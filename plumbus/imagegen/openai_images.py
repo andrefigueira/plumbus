@@ -3,11 +3,17 @@
 Generation goes to /v1/images/generations. Extra views go to /v1/images/edits
 with the first view attached, so the model matches the subject it already drew
 instead of re-interpreting a description. gpt-image-* always returns b64_json.
+
+Both endpoints stream when asked, emitting `image_generation.partial_image`
+events as the picture resolves. Each partial is written beside its final image
+and announced through the normal event channel with a `[partial]` marker, so
+the browser can show the picture arriving instead of a spinner.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +87,20 @@ class GPTImage2Provider(ImageProvider):
                         "TRELLIS's non-commercial RMBG-2.0 stage.",
             },
             {
+                "key": "partials",
+                "label": "Progressive preview",
+                "type": "select",
+                "default": "2",
+                "options": [
+                    {"value": "0", "label": "off  (final image only)"},
+                    {"value": "1", "label": "1 preview"},
+                    {"value": "2", "label": "2 previews"},
+                    {"value": "3", "label": "3 previews"},
+                ],
+                "help": "Stream partial renders while the image resolves. Costs nothing "
+                        "extra and does not change the final image.",
+            },
+            {
                 "key": "raw_prompt",
                 "label": "Send my prompt verbatim",
                 "type": "bool",
@@ -115,8 +135,75 @@ class GPTImage2Provider(ImageProvider):
             pass
         raise ImageError(f"OpenAI returned {r.status_code}: {detail}")
 
+    @staticmethod
+    def _partials(p: dict) -> int:
+        try:
+            return max(0, min(3, int(p.get("partials", 2))))
+        except (TypeError, ValueError):
+            return 2
+
+    @staticmethod
+    def _partial_path(dest: Path) -> Path:
+        return dest.with_name(f"{dest.stem}.partial.png")
+
+    async def _consume_stream(
+        self,
+        r: httpx.Response,
+        dest: Path,
+        on_event: EventFn | None,
+    ) -> dict:
+        """Write partials as they arrive, then the final image. Returns usage.
+
+        A partial that fails to decode is skipped rather than fatal: it is only
+        a preview, and losing one must never cost the finished image.
+        """
+        usage: dict = {}
+        final_written = False
+        partial_dest = self._partial_path(dest)
+
+        async for line in r.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            raw = line[5:].strip()
+            if not raw or raw == "[DONE]":
+                continue
+            try:
+                ev = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            kind = ev.get("type") or ""
+            b64 = ev.get("b64_json")
+            if not b64:
+                continue
+
+            if kind.endswith("partial_image"):
+                if final_written:
+                    continue
+                try:
+                    partial_dest.write_bytes(base64.b64decode(b64))
+                except Exception:  # noqa: BLE001
+                    continue
+                idx = ev.get("partial_image_index", 0)
+                if on_event:
+                    await on_event(f"[partial] {partial_dest.name} {idx}")
+            else:
+                dest.write_bytes(base64.b64decode(b64))
+                final_written = True
+                usage = ev.get("usage") or {}
+
+        if not final_written:
+            raise ImageError("the image stream ended without a final image")
+        partial_dest.unlink(missing_ok=True)
+        return usage
+
     async def _generate_one(
-        self, client: httpx.AsyncClient, prompt: str, p: dict, dest: Path
+        self,
+        client: httpx.AsyncClient,
+        prompt: str,
+        p: dict,
+        dest: Path,
+        on_event: EventFn | None = None,
     ) -> dict:
         body: dict[str, Any] = {
             "model": "gpt-image-2",
@@ -129,14 +216,34 @@ class GPTImage2Provider(ImageProvider):
         if p.get("transparent", True):
             body["background"] = "transparent"
 
-        r = await client.post(f"{API}/images/generations", json=body, headers=self._headers())
-        self._raise_for(r)
-        data = r.json()
-        self._write(data, dest)
-        return data.get("usage") or {}
+        partials = self._partials(p)
+        if not partials:
+            r = await client.post(
+                f"{API}/images/generations", json=body, headers=self._headers()
+            )
+            self._raise_for(r)
+            data = r.json()
+            self._write(data, dest)
+            return data.get("usage") or {}
+
+        body["stream"] = True
+        body["partial_images"] = partials
+        async with client.stream(
+            "POST", f"{API}/images/generations", json=body, headers=self._headers()
+        ) as r:
+            if r.status_code >= 400:
+                await r.aread()
+                self._raise_for(r)
+            return await self._consume_stream(r, dest, on_event)
 
     async def _edit_view(
-        self, client: httpx.AsyncClient, prompt: str, p: dict, ref: Path, dest: Path
+        self,
+        client: httpx.AsyncClient,
+        prompt: str,
+        p: dict,
+        ref: Path,
+        dest: Path,
+        on_event: EventFn | None = None,
     ) -> dict:
         form: dict[str, Any] = {
             "model": "gpt-image-2",
@@ -150,13 +257,26 @@ class GPTImage2Provider(ImageProvider):
             form["background"] = "transparent"
 
         files = [("image[]", (ref.name, ref.read_bytes(), "image/png"))]
-        r = await client.post(
-            f"{API}/images/edits", data=form, files=files, headers=self._headers()
-        )
-        self._raise_for(r)
-        data = r.json()
-        self._write(data, dest)
-        return data.get("usage") or {}
+        partials = self._partials(p)
+        if not partials:
+            r = await client.post(
+                f"{API}/images/edits", data=form, files=files, headers=self._headers()
+            )
+            self._raise_for(r)
+            data = r.json()
+            self._write(data, dest)
+            return data.get("usage") or {}
+
+        # Multipart values must be strings, unlike the JSON body above.
+        form["stream"] = "true"
+        form["partial_images"] = str(partials)
+        async with client.stream(
+            "POST", f"{API}/images/edits", data=form, files=files, headers=self._headers()
+        ) as r:
+            if r.status_code >= 400:
+                await r.aread()
+                self._raise_for(r)
+            return await self._consume_stream(r, dest, on_event)
 
     # --------------------------------------------------------------- public
 
@@ -193,7 +313,7 @@ class GPTImage2Provider(ImageProvider):
             )
             await on_event(f"generating {VIEW_LABELS[base_view].lower()} view")
             base_path = req.out_dir / f"{req.stem}_{base_view}.png"
-            tally(await self._generate_one(client, base_prompt, p, base_path))
+            tally(await self._generate_one(client, base_prompt, p, base_path, on_event))
             images.append(GeneratedImage(base_path, base_view, base_prompt))
             await on_event(f"[view] {VIEW_LABELS[base_view]} ready")
 
@@ -203,7 +323,7 @@ class GPTImage2Provider(ImageProvider):
                 async def one(view: str) -> GeneratedImage:
                     prompt = build_view_edit(req.subject, view, transparent, profile)
                     dest = req.out_dir / f"{req.stem}_{view}.png"
-                    tally(await self._edit_view(client, prompt, p, base_path, dest))
+                    tally(await self._edit_view(client, prompt, p, base_path, dest, on_event))
                     # These run concurrently, so report each as it lands.
                     await on_event(f"[view] {VIEW_LABELS[view]} ready")
                     return GeneratedImage(dest, view, prompt)

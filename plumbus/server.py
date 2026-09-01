@@ -281,6 +281,7 @@ async def make_reference(
             REF_PROGRESS.pop(next(iter(REF_PROGRESS)))
         REF_PROGRESS[token] = {
             "done": 0, "total": len(views), "stage": "starting", "finished": False,
+            "preview": None, "rev": 0,
         }
 
     async def on_event(msg: str) -> None:
@@ -290,9 +291,16 @@ async def make_reference(
         entry = REF_PROGRESS.get(token)
         if entry is None:
             return
-        if msg.startswith("[view] "):
+        if msg.startswith("[partial] "):
+            # "[partial] <filename> <index>" — the newest partial wins, whichever
+            # view produced it. rev is what the browser watches to re-fetch.
+            name = msg.split(" ")[1]
+            entry["preview"] = f"/uploads/{name}"
+            entry["rev"] = entry.get("rev", 0) + 1
+        elif msg.startswith("[view] "):
             entry["done"] = min(entry["done"] + 1, entry["total"])
             entry["stage"] = msg[7:]
+            entry["preview"] = None
         else:
             entry["stage"] = msg
 

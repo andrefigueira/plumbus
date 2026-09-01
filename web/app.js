@@ -533,6 +533,7 @@ function startRefProgress(token, total) {
   paintRefProgress(0, total, 'starting');
 
   const started = Date.now();
+  let seenRev = 0;
   const tick = async () => {
     try {
       const p = await api(`/api/imagegen/progress/${token}`);
@@ -540,6 +541,15 @@ function startRefProgress(token, total) {
       // never frozen, but never let the guess overtake a real completion.
       const guess = Math.min(0.55, (Date.now() - started) / 42000);
       paintRefProgress(p.done || 0, p.total || total, p.stage || 'drawing', guess);
+
+      // Progressive preview: the partial file keeps its name, so the revision
+      // counter is what busts the cache.
+      if (p.preview && p.rev > seenRev) {
+        seenRev = p.rev;
+        setViewerPreview(`${p.preview}?r=${p.rev}`);
+      } else if (!p.preview && seenRev) {
+        seenRev = 0;
+      }
     } catch { /* the POST is the source of truth; a missed poll is harmless */ }
   };
   tick();
@@ -558,6 +568,7 @@ function paintRefProgress(done, total, stage, guess = 0) {
 function stopRefProgress() {
   clearInterval(refPoll);
   refPoll = null;
+  $('#viewer-image-main').classList.remove('previewing');
   $('#ref-progress').hidden = true;
   $('#ref-progress-fill').style.width = '0%';
 }
@@ -1048,7 +1059,10 @@ function showViewerImages(items, { kicker = null, name = null, pending = null } 
 
   const main = $('#viewer-image-main');
   main.hidden = !items.length;
-  if (items.length) main.src = items[0].url;
+  if (items.length) {
+    main.src = items[0].url;
+    main.classList.remove('previewing');
+  }
 
   const strip = $('#viewer-image-strip');
   strip.innerHTML = '';
@@ -1073,6 +1087,16 @@ function showViewerImages(items, { kicker = null, name = null, pending = null } 
     $('#viewer-kicker').textContent = kicker;
     $('#viewer-name').textContent = name || '';
   }
+}
+
+/** Swap in a partial render while the image is still resolving. */
+function setViewerPreview(url) {
+  const main = $('#viewer-image-main');
+  if ($('#viewer-image').hidden) return;
+  const next = new Image();
+  // Only swap once the bytes are decoded, so the pane never blanks mid-draw.
+  next.onload = () => { main.src = url; main.hidden = false; main.classList.add('previewing'); };
+  next.src = url;
 }
 
 function hideViewerImages() {
