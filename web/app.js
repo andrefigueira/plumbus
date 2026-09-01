@@ -21,6 +21,7 @@ const state = {
   known: new Set(),    // job ids we have queued, so a poll race cannot unselect them
   viewerImages: [],    // what the centre pane is showing when it is not showing a mesh
   viewerSig: null,     // url signature of those images, so polling does not rebuild them
+  drawing: false,      // a reference is being drawn; the viewer belongs to it
   objectUrls: [],      // blob URLs held for the viewer, revoked on rebuild
 };
 
@@ -485,7 +486,7 @@ $('#btn-reference').addEventListener('click', async () => {
   const refParams = collectParams($('#ref-params'), { extras: false });
   refParams.asset_profile = state.profile;
   const wanted = (refParams.views || ['three_quarter']).length;
-  startRefProgress(token, wanted);
+  startRefProgress(token, wanted, Number(refParams.partials ?? 0) || 0);
   viewer.clear();
   state.loadedUrl = null;
   showViewerImages([], {
@@ -527,7 +528,8 @@ $('#btn-reference').addEventListener('click', async () => {
 // the server updates as each view lands.
 let refPoll = null;
 
-function startRefProgress(token, total) {
+function startRefProgress(token, total, partials = 0) {
+  state.drawing = true;
   const box = $('#ref-progress');
   box.hidden = false;
   paintRefProgress(0, total, 'starting');
@@ -540,7 +542,9 @@ function startRefProgress(token, total) {
       // Before the first view lands, creep the bar on elapsed time so it is
       // never frozen, but never let the guess overtake a real completion.
       const guess = Math.min(0.55, (Date.now() - started) / 42000);
-      paintRefProgress(p.done || 0, p.total || total, p.stage || 'drawing', guess);
+      paintRefProgress(p.done || 0, p.total || total, p.stage || 'drawing', guess, {
+        rev: p.rev || 0, partials,
+      });
 
       // Progressive preview: the partial file keeps its name, so the revision
       // counter is what busts the cache.
@@ -556,9 +560,14 @@ function startRefProgress(token, total) {
   refPoll = setInterval(tick, 700);
 }
 
-function paintRefProgress(done, total, stage, guess = 0) {
+function paintRefProgress(done, total, stage, guess = 0, { rev = 0, partials = 0 } = {}) {
   const real = total ? done / total : 0;
-  const frac = Math.max(real, real === 0 ? guess : 0);
+  // Each partial is a real signal that the current view is part way there, so
+  // the bar moves on evidence rather than dying at whatever the guess reached.
+  const intra = partials && total && done < total
+    ? Math.min(rev, partials) / (partials + 1) / total
+    : 0;
+  const frac = Math.max(real + intra, real === 0 ? guess : 0);
   $('#ref-progress-fill').style.width = `${Math.round(frac * 100)}%`;
   $('#ref-progress-pct').textContent = `${Math.round(frac * 100)}%`;
   $('#ref-progress-stage').textContent =
@@ -566,11 +575,18 @@ function paintRefProgress(done, total, stage, guess = 0) {
 }
 
 function stopRefProgress() {
+  state.drawing = false;
   clearInterval(refPoll);
   refPoll = null;
   $('#viewer-image-main').classList.remove('previewing');
-  $('#ref-progress').hidden = true;
-  $('#ref-progress-fill').style.width = '0%';
+  // Land on 100 for a beat rather than vanishing from wherever the poll left it.
+  $('#ref-progress-fill').style.width = '100%';
+  $('#ref-progress-pct').textContent = '100%';
+  setTimeout(() => {
+    if (state.drawing) return;
+    $('#ref-progress').hidden = true;
+    $('#ref-progress-fill').style.width = '0%';
+  }, 450);
 }
 
 /* ── source images ─────────────────────────────────────────────────────── */
@@ -823,9 +839,11 @@ async function loadSelected() {
   catch { return; }
 
   const displayName = job.params?._name || job.id;
-  $('#viewer-context').hidden = false;
-  $('#viewer-kicker').textContent = job.status === 'done' ? 'Result' : job.status;
-  $('#viewer-name').textContent = displayName;
+  if (!state.drawing) {
+    $('#viewer-context').hidden = false;
+    $('#viewer-kicker').textContent = job.status === 'done' ? 'Result' : job.status;
+    $('#viewer-name').textContent = displayName;
+  }
 
   $('#log-title').textContent = `Activity · ${displayName}`;
   const logEl = $('#log');
@@ -842,6 +860,8 @@ async function loadSelected() {
   $('#btn-cancel').disabled = !['queued', 'running'].includes(job.status);
   $('#btn-download').disabled = job.status !== 'done';
   $('#btn-export').disabled = job.status !== 'done';
+
+  if (state.drawing) return;   // the reference being drawn owns the viewer
 
   if (job.status === 'done') {
     const url = `/outputs/${job.id}.glb`;
