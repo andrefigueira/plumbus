@@ -22,6 +22,7 @@ const state = {
   viewerImages: [],    // what the centre pane is showing when it is not showing a mesh
   viewerSig: null,     // url signature of those images, so polling does not rebuild them
   drawing: false,      // a reference is being drawn; the viewer belongs to it
+  match: new Map(),    // job id -> per-view reference match scores, computed on demand
   objectUrls: [],      // blob URLs held for the viewer, revoked on rebuild
 };
 
@@ -823,6 +824,10 @@ function renderQueue() {
 }
 
 async function select(id) {
+  if (id !== state.selected) {
+    const job = state.jobs.find((j) => j.id === id);
+    renderMatch(job, state.match.get(id) || null);
+  }
   state.selected = id;
   renderQueue();
   await loadSelected();
@@ -917,6 +922,8 @@ function clearResult(headline = 'Nothing loaded', detail = 'Pick a finished asse
   $('#rig').className = 'rig rig-empty';
   $('#rig').innerHTML = '<div class="rig-none"><h3>Nothing to rig yet</h3><p>The skeleton browser opens once a build finishes.</p></div>';
   $('#tab-rig').classList.remove('has-rig');
+  $('#match').className = 'match match-empty';
+  $('#match').innerHTML = '<div class="match-intro"><h3>Nothing to score yet</h3><p>Reference matching opens once a build finishes.</p></div>';
   for (const tool of ['bones', 'joints']) {
     const btn = $(`[data-tool="${tool}"]`);
     btn.disabled = true;
@@ -987,6 +994,7 @@ function showStats(job, info) {
 
   state.bone = null;
   renderRig(job, info);
+  renderMatch(job, state.match.get(job.id) || null);
   $('#tab-rig').classList.toggle('has-rig', !!joints);
 }
 
@@ -1152,6 +1160,220 @@ function previewSources({ kicker = 'Reference', name = '' } = {}) {
   showViewerImages(items, { kicker, name });
 }
 
+/* ── reference match scoring ───────────────────────────────────────────── */
+
+const MASK_N = 64;   // both silhouettes are normalised into this square
+
+/** Alpha silhouette of an image, at its native resolution. */
+async function maskFromUrl(url) {
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    el.crossOrigin = 'anonymous';
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('could not load reference'));
+    el.src = url;
+  });
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, w, h).data;
+
+  const mask = new Uint8Array(w * h);
+  let covered = 0;
+  for (let i = 0; i < w * h; i++) {
+    const on = data[i * 4 + 3] > 128 ? 1 : 0;
+    mask[i] = on;
+    covered += on;
+  }
+  // A fully opaque reference has no silhouette to read; that is not a low
+  // score, it is a measurement we cannot make.
+  return { mask, w, h, opaque: covered > w * h * 0.985, empty: covered < w * h * 0.001 };
+}
+
+/**
+ * Crop to the silhouette's bounding box and rescale into MASK_N, preserving
+ * aspect. That removes framing and scale differences so the comparison is
+ * about shape and proportion, which is what actually survives into geometry.
+ */
+function normaliseMask(mask, w, h) {
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!mask[y * w + x]) continue;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  const out = new Uint8Array(MASK_N * MASK_N);
+  if (maxX < 0) return out;
+
+  const bw = maxX - minX + 1, bh = maxY - minY + 1;
+  const scale = Math.max(bw, bh) / MASK_N;         // longer side fills the square
+  const offX = (MASK_N - bw / scale) / 2;
+  const offY = (MASK_N - bh / scale) / 2;
+
+  for (let y = 0; y < MASK_N; y++) {
+    for (let x = 0; x < MASK_N; x++) {
+      const sx = Math.floor(minX + (x - offX) * scale);
+      const sy = Math.floor(minY + (y - offY) * scale);
+      if (sx < minX || sx > maxX || sy < minY || sy > maxY) continue;
+      out[y * MASK_N + x] = mask[sy * w + sx];
+    }
+  }
+  return out;
+}
+
+function iou(a, b) {
+  let inter = 0, union = 0;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i];
+    if (x | y) union++;
+    if (x & y) inter++;
+  }
+  return union ? inter / union : 0;
+}
+
+/** The renderer's readback is bottom-up, so flip before normalising. */
+function flipRows(mask, size) {
+  const out = new Uint8Array(mask.length);
+  for (let y = 0; y < size; y++) {
+    out.set(mask.subarray(y * size, (y + 1) * size), (size - 1 - y) * size);
+  }
+  return out;
+}
+
+const MATCH_VERDICT = [
+  [0.90, 'good', 'Matches the reference closely.'],
+  [0.78, 'good', 'Close. Minor silhouette drift, usually fine.'],
+  [0.62, 'warn', 'Loose. The engine reinterpreted part of the shape.'],
+  [0.00, 'bad',  'Weak. This view is largely guessed rather than observed.'],
+];
+
+function verdictFor(score) {
+  return MATCH_VERDICT.find(([floor]) => score >= floor);
+}
+
+async function scoreAgainstReferences(job) {
+  const sources = job.source_images || [];
+  if (!sources.length) throw new Error('this asset has no stored reference images');
+  if (!viewer.model) throw new Error('load the mesh first');
+
+  const wasTurntable = viewer.turntable;
+  viewer.setTurntable(false);
+  try {
+    const sweep = viewer.silhouetteSweep({ azimuths: 48, elevations: [-10, 0, 12, 26], size: 128 });
+    if (!sweep.length) throw new Error('the mesh produced no silhouette');
+    const rendered = sweep.map((s) => ({
+      ...s, norm: normaliseMask(flipRows(s.mask, s.size), s.size, s.size),
+    }));
+
+    const views = [];
+    for (const path of sources) {
+      const url = `/uploads/${path.split('/').pop()}`;
+      let ref;
+      try { ref = await maskFromUrl(url); }
+      catch { views.push({ url, error: 'could not read this reference' }); continue; }
+
+      if (ref.opaque) { views.push({ url, error: 'no transparency, so no silhouette to compare' }); continue; }
+      if (ref.empty)  { views.push({ url, error: 'reference is empty' }); continue; }
+
+      const refNorm = normaliseMask(ref.mask, ref.w, ref.h);
+      let best = { score: -1 };
+      for (const r of rendered) {
+        const score = iou(refNorm, r.norm);
+        if (score > best.score) best = { score, azimuth: r.azimuth, elevation: r.elevation };
+      }
+      views.push({ url, ...best, shot: viewer.shotAt(best.azimuth, best.elevation, 256) });
+    }
+    return views;
+  } finally {
+    viewer.setTurntable(wasTurntable);
+  }
+}
+
+function renderMatch(job, result) {
+  const wrap = $('#match');
+  if (!result) {
+    const sources = (job?.source_images || []).length;
+    wrap.className = 'match match-empty';
+    wrap.innerHTML = `
+      <div class="match-intro">
+        <h3>Score the mesh against its reference</h3>
+        <p>Renders the finished mesh from every angle, compares each silhouette
+           against the reference it was built from, and reports where the engine
+           observed the shape and where it guessed.</p>
+        <button class="secondary" id="btn-score" ${sources ? '' : 'disabled'}
+                data-tip="Sweeps 192 angles and scores silhouette overlap per reference view. Runs locally, takes a second or two.">
+          ${sources ? `Score against ${sources} reference${sources === 1 ? '' : 's'}` : 'No stored reference for this asset'}
+        </button>
+      </div>`;
+    wrap.querySelector('#btn-score')?.addEventListener('click', runScore);
+    return;
+  }
+
+  const scored = result.filter((v) => !v.error);
+  const worst = scored.length ? scored.reduce((a, b) => (a.score < b.score ? a : b)) : null;
+  const mean = scored.length ? scored.reduce((a, v) => a + v.score, 0) / scored.length : 0;
+
+  let advice;
+  if (!scored.length) advice = 'Nothing measurable. Generate references with a transparent background to score them.';
+  else if (worst.score < 0.62) advice = `The weakest view scores ${(worst.score * 100).toFixed(0)}%. Draw that view as an extra reference and re-run at the same seed, so the engine observes it instead of inventing it.`;
+  else if (mean < 0.8) advice = 'The mesh follows the reference loosely. A cleaner source, plainer background and even lighting usually buys more than a higher quality preset.';
+  else advice = 'The mesh follows its references closely. Any remaining problems are in the source images, not the engine.';
+
+  wrap.className = 'match';
+  wrap.innerHTML = `
+    <div class="match-head">
+      <h3>Reference match</h3>
+      <span class="muted small">${scored.length ? `mean ${(mean * 100).toFixed(0)}%` : 'not measurable'}</span>
+      <button class="ghost" id="btn-rescore" data-tip="Run the sweep again.">Re-score</button>
+    </div>
+    <div class="match-views">
+      ${result.map((v) => {
+        if (v.error) {
+          return `<div class="match-view">
+            <div class="match-pair"><img src="${v.url}" alt=""></div>
+            <div class="match-bar-row"><b class="warn">${v.error}</b></div>
+          </div>`;
+        }
+        const [, tone, text] = verdictFor(v.score);
+        const pct = (v.score * 100).toFixed(0);
+        return `<div class="match-view">
+          <div class="match-pair">
+            <figure><img src="${v.url}" alt=""><figcaption>reference</figcaption></figure>
+            <figure><img src="${v.shot}" alt=""><figcaption>mesh · ${v.azimuth}° / ${v.elevation}°</figcaption></figure>
+          </div>
+          <div class="match-bar-row">
+            <div class="match-bar"><div class="match-fill ${tone}" style="width:${pct}%"></div></div>
+            <b class="${tone}">${pct}%</b>
+          </div>
+          <p class="match-note">${text}</p>
+        </div>`;
+      }).join('')}
+    </div>
+    <p class="match-advice">${advice}</p>`;
+  wrap.querySelector('#btn-rescore').addEventListener('click', runScore);
+}
+
+async function runScore() {
+  const job = state.jobs.find((j) => j.id === state.selected);
+  if (!job) return;
+  const btn = $('#btn-score') || $('#btn-rescore');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scoring…'; }
+  try {
+    const result = await scoreAgainstReferences(job);
+    state.match.set(job.id, result);
+    renderMatch(job, result);
+  } catch (err) {
+    toast(err.message, true);
+    renderMatch(job, null);
+  }
+}
+
 /* ── rig panel ─────────────────────────────────────────────────────────── */
 
 function selectBone(uuid, { focus = false } = {}) {
@@ -1260,16 +1482,14 @@ viewer.onBoneSelect = (uuid) => {
 
 function setResultTab(tab) {
   state.resultTab = tab;
-  $('#inspect').hidden = tab !== 'inspect';
-  $('#rig').hidden = tab !== 'rig';
-  $('#activity').hidden = tab !== 'activity';
-  $('#tab-inspect').classList.toggle('on', tab === 'inspect');
-  $('#tab-rig').classList.toggle('on', tab === 'rig');
-  $('#tab-activity').classList.toggle('on', tab === 'activity');
+  for (const name of ['inspect', 'match', 'rig', 'activity']) {
+    $(`#${name}`).hidden = tab !== name;
+    $(`#tab-${name}`).classList.toggle('on', tab === name);
+  }
 }
-$('#tab-inspect').addEventListener('click', () => setResultTab('inspect'));
-$('#tab-rig').addEventListener('click', () => setResultTab('rig'));
-$('#tab-activity').addEventListener('click', () => setResultTab('activity'));
+for (const name of ['inspect', 'match', 'rig', 'activity']) {
+  $(`#tab-${name}`).addEventListener('click', () => setResultTab(name));
+}
 
 /* ── tooltips ──────────────────────────────────────────────────────────── */
 

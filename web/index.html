@@ -261,6 +261,8 @@
         <div class="result-tabs" role="tablist">
           <button id="tab-inspect" class="result-tab on" role="tab"
                   data-tip="Fidelity, topology and animation-readiness checks measured from the finished GLB.">Inspect</button>
+          <button id="tab-match" class="result-tab" role="tab"
+                  data-tip="Score the finished mesh against the reference it was built from, per view.">Match</button>
           <button id="tab-rig" class="result-tab" role="tab"
                   data-tip="Skeleton browser. Walk the bone hierarchy, select a joint and see it in the viewer.">Rig</button>
           <button id="tab-activity" class="result-tab" role="tab"
@@ -278,6 +280,7 @@
       <div id="inspect" class="inspect empty-inspect">
         <div class="inspect-empty">A finished asset will show fidelity and animation-readiness checks here.</div>
       </div>
+      <div id="match" class="match match-empty" hidden></div>
       <div id="rig" class="rig" hidden></div>
       <div id="activity" class="activity" hidden>
         <div id="log-title" class="activity-title">Activity</div>

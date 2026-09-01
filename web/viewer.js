@@ -305,6 +305,137 @@ export class Viewer {
     this.controls.update();
   }
 
+  /* ── silhouette scoring ────────────────────────────────────────────────── */
+
+  /**
+   * Render the model's silhouette from a sweep of angles.
+   *
+   * Alpha coverage is all we need, so an override material makes every surface
+   * opaque white and the render target's own alpha channel becomes the mask.
+   * The user's camera, turntable and helper visibility are all restored.
+   */
+  silhouetteSweep({ azimuths = 36, elevations = [-8, 8, 22], size = 128 } = {}) {
+    if (!this.model) return [];
+
+    const box = new THREE.Box3().setFromObject(this.model);
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    if (!(sphere.radius > 0)) return [];
+
+    const wasGrid = this.grid.visible;
+    const wasGround = this.ground.visible;
+    const wasHelper = this.skeletonHelper?.visible;
+    const wasJoints = this.jointGroup.visible;
+    const wasBg = this.scene.background;
+    const wasRot = this.model.rotation.y;
+    const wasOverride = this.scene.overrideMaterial;
+
+    this.grid.visible = false;
+    this.ground.visible = false;
+    if (this.skeletonHelper) this.skeletonHelper.visible = false;
+    this.jointGroup.visible = false;
+    this.scene.background = null;
+    this.scene.overrideMaterial = this._flatMat ||= new THREE.MeshBasicMaterial({ color: 0xffffff });
+    this.model.rotation.y = 0;
+
+    const target = new THREE.WebGLRenderTarget(size, size, {
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: true,
+    });
+    const cam = new THREE.PerspectiveCamera(38, 1, 0.01, 500);
+    // Same framing at every angle, so scores compare like with like.
+    const dist = (sphere.radius / Math.sin((cam.fov * Math.PI) / 360)) * 1.18;
+
+    const prevTarget = this.renderer.getRenderTarget();
+    const prevAlpha = this.renderer.getClearAlpha();
+    this.renderer.setClearAlpha(0);
+    this.renderer.setRenderTarget(target);
+
+    const buf = new Uint8Array(size * size * 4);
+    const out = [];
+
+    for (const elDeg of elevations) {
+      const el = (elDeg * Math.PI) / 180;
+      for (let i = 0; i < azimuths; i++) {
+        const az = (i / azimuths) * Math.PI * 2;
+        cam.position.set(
+          sphere.center.x + dist * Math.cos(el) * Math.sin(az),
+          sphere.center.y + dist * Math.sin(el),
+          sphere.center.z + dist * Math.cos(el) * Math.cos(az),
+        );
+        cam.lookAt(sphere.center);
+        cam.updateProjectionMatrix();
+
+        this.renderer.clear();
+        this.renderer.render(this.scene, cam);
+        this.renderer.readRenderTargetPixels(target, 0, 0, size, size, buf);
+
+        const mask = new Uint8Array(size * size);
+        for (let px = 0; px < size * size; px++) mask[px] = buf[px * 4 + 3] > 128 ? 1 : 0;
+        out.push({ azimuth: Math.round((az * 180) / Math.PI), elevation: elDeg, size, mask });
+      }
+    }
+
+    this.renderer.setRenderTarget(prevTarget);
+    this.renderer.setClearAlpha(prevAlpha);
+    target.dispose();
+
+    this.scene.overrideMaterial = wasOverride;
+    this.grid.visible = wasGrid;
+    this.ground.visible = wasGround;
+    if (this.skeletonHelper) this.skeletonHelper.visible = wasHelper;
+    this.jointGroup.visible = wasJoints;
+    this.scene.background = wasBg;
+    this.model.rotation.y = wasRot;
+
+    return out;
+  }
+
+  /** A presentable PNG of the model from one angle, for showing next to the reference. */
+  shotAt(azimuth, elevation, size = 256) {
+    if (!this.model) return null;
+    const box = new THREE.Box3().setFromObject(this.model);
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+
+    const wasGrid = this.grid.visible;
+    const wasGround = this.ground.visible;
+    const wasRot = this.model.rotation.y;
+    const { width, height } = this.renderer.domElement;
+    const prevAspect = this.camera.aspect;
+    const prevPos = this.camera.position.clone();
+    const prevTarget = this.controls.target.clone();
+
+    this.grid.visible = false;
+    this.ground.visible = false;
+    this.model.rotation.y = 0;
+
+    const az = (azimuth * Math.PI) / 180;
+    const el = (elevation * Math.PI) / 180;
+    const dist = (sphere.radius / Math.sin((this.camera.fov * Math.PI) / 360)) * 1.18;
+    this.camera.aspect = 1;
+    this.camera.position.set(
+      sphere.center.x + dist * Math.cos(el) * Math.sin(az),
+      sphere.center.y + dist * Math.sin(el),
+      sphere.center.z + dist * Math.cos(el) * Math.cos(az),
+    );
+    this.camera.lookAt(sphere.center);
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(size, size, false);
+    this.renderer.render(this.scene, this.camera);
+    const url = this.renderer.domElement.toDataURL('image/png');
+
+    this.renderer.setSize(width, height, false);
+    this.camera.aspect = prevAspect;
+    this.camera.position.copy(prevPos);
+    this.controls.target.copy(prevTarget);
+    this.camera.updateProjectionMatrix();
+    this.controls.update();
+    this.grid.visible = wasGrid;
+    this.ground.visible = wasGround;
+    this.model.rotation.y = wasRot;
+    return url;
+  }
+
   frame() {
     if (!this.model) return;
     const box = new THREE.Box3().setFromObject(this.model);
