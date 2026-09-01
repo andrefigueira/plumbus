@@ -137,9 +137,22 @@ def build_view_edit(
     subject = subject.strip().rstrip(".")
     camera = VIEWS.get(view, VIEWS["front"])
     background = _BG_TRANSPARENT if transparent else _BG_FLAT
-    what = f"head of {subject}" if profile == "head" else subject
+    if profile == "head":
+        # A head close-up exists for the FACE, so identity is preserved but
+        # face-occluding garments are not: a hat brim shades the brow and hides
+        # the hairline in every view, and what the engine cannot observe it
+        # shreds. The body's own views keep the outfit; this one loses it.
+        return (
+            f"Redraw the head and shoulders of the exact same {subject} from the "
+            f"attached reference image: identical face, identity, age, bone "
+            f"structure, skin, eyes and hair colour in every detail. Remove "
+            f"anything covering the head or face entirely: no hat, no hood, no "
+            f"helmet, no glasses, no mask, no scarf over the chin, with the hair "
+            f"pulled back off the face and both ears fully visible. "
+            f"Camera: {camera}. {background} {_GEOMETRY_RULES} {_HEAD_RULES}"
+        )
     return (
-        f"Redraw the exact same {what} from the attached reference image, "
+        f"Redraw the exact same {subject} from the attached reference image, "
         f"unchanged in shape, proportion, colour, material and every detail. "
         f"Only the camera angle changes. Camera: {camera}. "
         f"{background} {_GEOMETRY_RULES} {_profile_rules(profile)}"
