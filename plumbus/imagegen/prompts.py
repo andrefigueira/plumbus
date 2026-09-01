@@ -88,7 +88,13 @@ _HEAD_RULES = (
     "jaw, and none cast by the hair. Light the face flatly and evenly from directly in front. "
     "No specular highlight or catchlight in the eyes, on the nose, forehead or cheekbones. "
     "Skin reads as skin: pores, fine lines, stubble and natural colour variation are visible, "
-    "but flat and unshaded, never glossy, wet or waxy."
+    "but flat and unshaded, never glossy, wet or waxy. "
+    "Facial hair is part of the face and is fully preserved: any beard, moustache, stubble and "
+    "the eyebrows stay at their real length, colour and density, rendered as a solid, clearly "
+    "bounded mass, not wispy single strands. "
+    "Below the neck the subject wears only a plain, fitted, matte light-grey crew-neck t-shirt, "
+    "whatever they were wearing before: no coat, no collar, no hood bunched at the neck, no "
+    "scarf, no jewellery. The shoulders exist to give the scan a clean base, nothing more."
 )
 
 
@@ -145,10 +151,12 @@ def build_view_edit(
         return (
             f"Redraw the head and shoulders of the exact same {subject} from the "
             f"attached reference image: identical face, identity, age, bone "
-            f"structure, skin, eyes and hair colour in every detail. Remove "
-            f"anything covering the head or face entirely: no hat, no hood, no "
-            f"helmet, no glasses, no mask, no scarf over the chin, with the hair "
-            f"pulled back off the face and both ears fully visible. "
+            f"structure, skin, eyes and hair colour in every detail, and exactly "
+            f"the same facial hair, the same beard, moustache, stubble and "
+            f"eyebrows at the same length, colour and density. Remove only "
+            f"garments and accessories covering the head or face: no hat, no "
+            f"hood, no helmet, no glasses, no mask, no scarf, with the scalp "
+            f"hair pulled back off the face and both ears fully visible. "
             f"Camera: {camera}. {background} {_GEOMETRY_RULES} {_HEAD_RULES}"
         )
     return (
