@@ -206,6 +206,7 @@ function renderParams(wrap, schema) {
           box.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c.classList.contains('on'))));
           markBaseView(box);
           refreshPromptPeek();
+          syncDrawCost();
         });
         box.appendChild(chip);
       }
@@ -259,7 +260,7 @@ function renderParams(wrap, schema) {
       renderThumbs();
       syncGenerate();
     }
-    if (wrap === $('#ref-params')) refreshPromptPeek();
+    if (wrap === $('#ref-params')) { refreshPromptPeek(); syncDrawCost(); }
   };
 }
 
@@ -288,6 +289,35 @@ function applyQualityPreset() {
   syncGenerate();
 }
 
+// Published gpt-image-2 rates at 1024x1024. Larger sizes scale with pixel area,
+// which is an approximation, so this is labelled as an estimate in the UI and
+// the actual spend is reconciled from the API's own usage after every draw.
+const IMAGE_RATES = { low: 0.006, medium: 0.053, high: 0.211 };
+const RATE_BASE_PX = 1024 * 1024;
+
+function estimateDrawCost() {
+  const q = $('#ref-params [data-key="quality"]')?.value || 'high';
+  const size = $('#ref-params [data-key="size"]')?.value || '1024x1024';
+  const views = $$('#ref-params [data-views] .chip.on').length || 1;
+  const rate = IMAGE_RATES[q];
+  if (!rate) return null;
+  const [w, h] = size === 'auto' ? [1024, 1024] : size.split('x').map(Number);
+  const area = (w * h) / RATE_BASE_PX;
+  return { total: rate * area * views, views, quality: q, size };
+}
+
+function syncDrawCost() {
+  const el = $('#draw-cost');
+  if (!el) return;
+  const est = estimateDrawCost();
+  if (!est || !state.imgProvider?.available) { el.textContent = ''; return; }
+  const each = est.total / est.views;
+  el.textContent =
+    `${est.views} view${est.views === 1 ? '' : 's'} · ${est.quality} · ${est.size} ` +
+    `≈ $${est.total.toFixed(2)} (about $${each.toFixed(2)} each)`;
+  el.classList.toggle('dear', est.total >= 1);
+}
+
 const PROFILES = {
   object: {
     // Static props want a watertight shell, so fill and tidy freely.
@@ -310,6 +340,8 @@ const PROFILES = {
     views: ['front', 'left', 'right', 'three_quarter'], base: 'front', size: '2048x2048',
     placeholder: 'Weathered samurai in his forties, scar across the left cheek',
     hint: 'Head and shoulders only. Cropping to the head is the whole point: a full-body reference leaves about 100px of face, this leaves about 900px, and the texture is spent on one head instead of a whole body.',
+    expects: 'a person or humanoid face',
+    note: 'Head is built for a face going into Unreal\u2019s Mesh to MetaHuman. For a creature, prop or full body, use Object or Character instead.',
   },
 };
 
@@ -325,6 +357,11 @@ function applyProfile() {
   $('#repair-holes').checked = spec.repairHoles;
   $('#ref-subject').placeholder = spec.placeholder;
   $('#source-hint').textContent = spec.hint;
+  const note = $('#profile-note');
+  if (note) {
+    note.textContent = spec.note || '';
+    note.hidden = !spec.note;
+  }
 
   const sizeEl = $('#ref-params [data-key="size"]');
   if (sizeEl && [...sizeEl.options].some((o) => o.value === spec.size)) sizeEl.value = spec.size;
@@ -343,6 +380,7 @@ function applyProfile() {
   }
   applyQualityPreset();
   refreshPromptPeek();
+  syncDrawCost();
   syncGenerate();
   saveSetup();
 }
@@ -420,6 +458,7 @@ async function loadImagegen() {
   $('#btn-reference').disabled = !prov.available;
   $('#ref-subject').disabled = !prov.available;
   refreshPromptPeek();
+  syncDrawCost();
 }
 
 let peekTimer;

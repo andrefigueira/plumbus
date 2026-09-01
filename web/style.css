@@ -1387,3 +1387,11 @@ button {
 .modal-result b { color: var(--ink); }
 .modal-result ul { margin: 6px 0 0; padding-left: 16px; }
 .modal-result li { margin-bottom: 4px; }
+
+.draw-cost {
+  margin: 7px 0 0;
+  min-height: 15px;
+  font: 10.5px/1.4 var(--mono);
+  color: var(--ink-faint);
+}
+.draw-cost.dear { color: var(--warn); }

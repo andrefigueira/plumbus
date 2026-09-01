@@ -78,6 +78,7 @@
               <b>Head</b><span>MetaHuman input</span>
             </button>
           </div>
+          <p id="profile-note" class="help-copy" hidden></p>
           <div id="ref-provider" class="ref-provider"></div>
           <label class="field-label" for="ref-subject">Describe the asset</label>
           <textarea id="ref-subject" rows="3"
@@ -86,6 +87,8 @@
           <div id="ref-params" class="params"></div>
           <button id="btn-reference" class="secondary" disabled
                   data-tip="Draw reference images with GPT Image 2 and drop them straight into step 2.">Generate reference</button>
+
+          <p id="draw-cost" class="draw-cost" data-tip="Estimated from published per-image rates, scaled by pixel area. The exact spend depends on OpenAI's token accounting, so treat it as close, not exact."></p>
 
           <div id="ref-progress" class="ref-progress" hidden>
             <div class="ref-progress-top">
