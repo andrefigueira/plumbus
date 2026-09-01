@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plumbus</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🫀</text></svg>">
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <h1>Plumbus</h1>
+    <span class="tag">everyone has one in their home</span>
+  </div>
+  <div class="bar-right">
+    <span class="save-state" id="save-state">setup saved locally</span>
+    <span id="worker-state" class="pill pill-idle"
+          data-tip="Worker status. Jobs run one at a time, so a second generation waits for the first to finish.">idle</span>
+    <button id="btn-theme" class="icon-button" aria-label="Toggle theme"
+            data-tip="Switch between the light and dark interface. The viewer background follows.">◐</button>
+  </div>
+</header>
+
+<main class="shell">
+
+  <!-- ─────────────────────────────── forge -->
+  <section class="pane pane-left">
+
+    <nav class="wizard" id="wizard" role="tablist" aria-label="Build steps">
+      <button class="wstep on" data-step="define" role="tab" aria-selected="true"
+              data-tip="Step 1 — pick Object or Character and describe the subject you want a reference drawn for.">
+        <span class="wnum">1</span><b>Define</b>
+      </button>
+      <button class="wstep" data-step="reference" role="tab" aria-selected="false"
+              data-tip="Step 2 — the source images the mesh is built from. Drop your own, or use the ones drawn in step 1.">
+        <span class="wnum">2</span><b>Reference</b>
+      </button>
+      <button class="wstep" data-step="build" role="tab" aria-selected="false"
+              data-tip="Step 3 — choose the engine and how much geometry and texture detail to spend time on.">
+        <span class="wnum">3</span><b>Build</b>
+      </button>
+      <button class="wstep" data-step="run" role="tab" aria-selected="false"
+              data-tip="Step 4 — name the asset and queue the generation.">
+        <span class="wnum">4</span><b>Run</b>
+      </button>
+    </nav>
+
+    <div class="wizard-body">
+
+      <!-- step 1 ─ define -->
+      <div class="wstage" data-stage="define">
+        <div class="stage-head">
+          <h2>Define the asset</h2>
+          <p>What are we making, and what should the reference look like?</p>
+        </div>
+
+        <div class="refgen">
+          <div class="profile-switch" id="profile-switch" aria-label="Asset profile">
+            <button type="button" data-profile="object" class="on"
+                    data-tip="Object — reproduces surfaces faithfully and closes pinholes. Best for props, hard-surface and set dressing.">
+              <b>Object</b><span>faithful surfaces</span>
+            </button>
+            <button type="button" data-profile="character"
+                    data-tip="Character — A-pose references, anatomy constraints, and deformation-safe topology kept intact for later rigging.">
+              <b>Character</b><span>rig-friendly base</span>
+            </button>
+          </div>
+          <div id="ref-provider" class="ref-provider"></div>
+          <label class="field-label" for="ref-subject">Describe the asset</label>
+          <textarea id="ref-subject" rows="3"
+            data-tip="Plain description of the subject. This is wrapped in a preset that strips depth of field, shadows and props, which all become geometry error."
+            placeholder="Cast iron fire hydrant, chipped red paint, hexagonal bolts"></textarea>
+          <div id="ref-params" class="params"></div>
+          <button id="btn-reference" class="secondary" disabled
+                  data-tip="Draw reference images with GPT Image 2 and drop them straight into step 2.">Generate reference</button>
+          <details class="ref-peek">
+            <summary data-tip="Read the exact prompt sent to the image model, preset and all.">See the prompt actually sent</summary>
+            <pre id="ref-prompt" class="ref-prompt"></pre>
+          </details>
+        </div>
+      </div>
+
+      <!-- step 2 ─ reference -->
+      <div class="wstage" data-stage="reference" hidden>
+        <div class="stage-head">
+          <h2>Reference images <span id="source-count" class="muted small"></span></h2>
+          <p>The mesh only reproduces what is in these images.</p>
+        </div>
+
+        <div id="drop" class="drop" tabindex="0"
+             data-tip="Drop image files here, click to browse, or paste from the clipboard anywhere on the page.">
+          <input id="file" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+          <div class="drop-inner">
+            <div class="drop-icon">↓</div>
+            <p><strong>Drop images or paste</strong></p>
+            <p class="muted">Click to browse · PNG, JPG, WebP</p>
+          </div>
+        </div>
+        <div id="thumbs" class="thumbs"></div>
+
+        <div class="hint" id="source-hint">
+          Clean three-quarter view, single subject, plain background, even lighting.
+          The mesh only reproduces what is in the image.
+        </div>
+      </div>
+
+      <!-- step 3 ─ build -->
+      <div class="wstage" data-stage="build" hidden>
+        <div class="stage-head">
+          <h2>Engine and quality</h2>
+          <p>Where the mesh gets made, and how much time it is worth.</p>
+        </div>
+
+        <div id="backends" class="backends"></div>
+
+        <div class="field-group">
+          <span class="field-label">Quality</span>
+          <div class="quality-switch" id="quality-switch" aria-label="Quality preset">
+            <button type="button" data-quality="preview"
+                    data-tip="Preview — low-resolution geometry for a fast silhouette and framing check. Roughly a minute.">
+              <b>Preview</b><span>fast</span></button>
+            <button type="button" data-quality="detailed" class="on"
+                    data-tip="Detailed — 1024 geometry and 2K textures. The right default for a final asset.">
+              <b>Detailed</b><span>balanced</span></button>
+            <button type="button" data-quality="hero"
+                    data-tip="Hero — cascade/max-resolution geometry and a dense source GLB. Longest run, best foundation for retopology.">
+              <b>Hero</b><span>maximum</span></button>
+          </div>
+          <p id="quality-note" class="help-copy"></p>
+        </div>
+
+        <details class="advanced">
+          <summary data-tip="Per-engine parameters, rendered from the engine's own schema.">Advanced settings</summary>
+          <div id="params" class="params"></div>
+
+          <label class="row check"
+                 data-tip="Skips hole-filling and decimation passes that damage edge flow. Leave on when the mesh is headed for retopology and skinning.">
+            <input type="checkbox" id="preserve-deformation">
+            <span>Preserve deformation topology <em>(recommended before rigging)</em></span>
+          </label>
+
+          <label class="row check"
+                 data-tip="Fills pinholes so the mesh is watertight. Good for static props, harmful for anything you intend to deform.">
+            <input type="checkbox" id="repair-holes" checked>
+            <span>Close pinholes <em>(best for static assets)</em></span>
+          </label>
+
+          <label class="row check"
+                 data-tip="Also writes a Draco + WebP compressed copy for web delivery, typically 60 to 80% smaller.">
+            <input type="checkbox" id="web-optimize" checked>
+            <span>Build a web copy <em>(Draco + WebP)</em></span>
+          </label>
+        </details>
+      </div>
+
+      <!-- step 4 ─ run -->
+      <div class="wstage" data-stage="run" hidden>
+        <div class="stage-head">
+          <h2>Name and run</h2>
+          <p>Check the plan, then queue it.</p>
+        </div>
+
+        <label class="row">
+          <span class="lbl">Name</span>
+          <input type="text" id="asset-name" placeholder="fire-hydrant" autocomplete="off"
+                 data-tip="Used for the asset card and as the default folder name on export.">
+        </label>
+
+        <dl class="run-summary" id="run-summary"></dl>
+
+        <div class="generate-dock">
+          <div class="generate-summary">
+            <span id="generate-label">Detailed object</span>
+            <span id="generate-meta">Add a reference to continue</span>
+          </div>
+          <button id="btn-generate" class="primary" disabled
+                  data-tip="Queue this build. It runs on the machine you are sitting at unless you picked a hosted engine.">Generate asset <span>→</span></button>
+          <p id="gen-note" class="muted small"></p>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="wizard-foot">
+      <button id="w-back" class="ghost" disabled
+              data-tip="Back to the previous step. Nothing is lost.">← Back</button>
+      <span id="w-hint" class="muted small"></span>
+      <button id="w-next" class="secondary"
+              data-tip="Continue to the next step.">Next →</button>
+    </div>
+
+  </section>
+
+  <!-- ─────────────────────────────── viewer -->
+  <section class="pane pane-center">
+    <div class="viewer-wrap">
+      <canvas id="stage"></canvas>
+
+      <div class="viewer-context" id="viewer-context" hidden>
+        <span id="viewer-kicker">Result</span>
+        <strong id="viewer-name"></strong>
+      </div>
+
+      <div class="viewer-empty" id="viewer-empty">
+        <p>Nothing loaded</p>
+        <p class="muted">Pick a finished asset, or generate one.</p>
+      </div>
+
+      <div class="viewer-tools">
+        <button data-tool="turntable" class="tool on"
+                data-tip="Turntable — slowly spin the model so you can read the silhouette from every side. Drag the canvas to orbit by hand.">⟳</button>
+        <button data-tool="wire" class="tool"
+                data-tip="Wireframe — draw the triangle edges. This is how you see whether the topology is a clean shell or a noisy soup.">△</button>
+        <button data-tool="bones" class="tool" disabled
+                data-tip="Skeleton — overlay the joint hierarchy on the mesh. Enabled only when the GLB actually carries a skeleton; the Rig tab below says what is missing.">⌁</button>
+        <button data-tool="joints" class="tool" disabled
+                data-tip="Joint markers — draw a dot at every joint pivot and let you click one to select it. Pairs with the bone tree in the Rig tab.">◇</button>
+        <button data-tool="grid" class="tool on"
+                data-tip="Ground grid — a one-metre reference grid and the shadow catcher. Turn it off for a clean screenshot.">▦</button>
+        <button data-tool="env" class="tool on"
+                data-tip="Environment lighting — image-based light that shows how the material reads. Off falls back to a single hard key light.">◍</button>
+        <button data-tool="frame" class="tool"
+                data-tip="Reframe — snap the camera back to fit the whole model after you have orbited away.">⤢</button>
+        <button data-tool="shot" class="tool"
+                data-tip="Save thumbnail — render a square three-quarter shot and store it as this asset's card image.">◉</button>
+      </div>
+
+      <div class="viewer-stats" id="viewer-stats"></div>
+    </div>
+
+    <div class="result-wrap">
+      <div class="log-head">
+        <div class="result-tabs" role="tablist">
+          <button id="tab-inspect" class="result-tab on" role="tab"
+                  data-tip="Fidelity, topology and animation-readiness checks measured from the finished GLB.">Inspect</button>
+          <button id="tab-rig" class="result-tab" role="tab"
+                  data-tip="Skeleton browser. Walk the bone hierarchy, select a joint and see it in the viewer.">Rig</button>
+          <button id="tab-activity" class="result-tab" role="tab"
+                  data-tip="Live log from the engine for the selected job.">Activity</button>
+        </div>
+        <div class="log-actions">
+          <button id="btn-export" class="ghost" disabled
+                  data-tip="Copy the GLB, thumbnail and a README into ../models/&lt;name&gt;/ in the parent repo.">Export to repo</button>
+          <button id="btn-download" class="ghost" disabled
+                  data-tip="Download the full-resolution source GLB, textures included.">Download GLB</button>
+          <button id="btn-cancel" class="ghost danger" disabled
+                  data-tip="Stop the running job. Partial output is discarded.">Cancel</button>
+        </div>
+      </div>
+      <div id="inspect" class="inspect empty-inspect">
+        <div class="inspect-empty">A finished asset will show fidelity and animation-readiness checks here.</div>
+      </div>
+      <div id="rig" class="rig" hidden></div>
+      <div id="activity" class="activity" hidden>
+        <div id="log-title" class="activity-title">Activity</div>
+        <pre id="log" class="log"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────── queue -->
+  <section class="pane pane-right">
+    <div class="pane-head">
+      <h2>Assets</h2>
+      <span id="queue-count" class="muted small"></span>
+    </div>
+    <div id="queue" class="queue"></div>
+  </section>
+
+</main>
+
+<div id="tip" class="tip" hidden></div>
+<div id="toast" class="toast" hidden></div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

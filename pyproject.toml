@@ -1,0 +1,34 @@
+[project]
+name = "plumbus"
+version = "0.1.0"
+description = "Local-first image-to-3D asset generation. Everyone has one in their home."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.12",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.27",
+    "pillow>=10.4",
+    "trimesh>=4.5",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+local = [
+    "torch>=2.5",
+    "torchvision>=0.20",
+    "transformers>=4.45",
+    "huggingface-hub>=0.26",
+]
+
+[project.scripts]
+plumbus = "plumbus.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["plumbus"]

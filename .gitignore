@@ -1,0 +1,21 @@
+# environments
+.venv/
+__pycache__/
+*.pyc
+
+# secrets
+.env
+
+# job store (SQLite writes -wal and -shm alongside the db)
+plumbus.db*
+
+# generated + downloaded artefacts
+outputs/
+uploads/
+vendor/
+models/
+*.glb
+*.obj
+*.ply
+
+.DS_Store

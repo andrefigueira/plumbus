@@ -1,0 +1,322 @@
+from __future__ import annotations
+
+import base64
+import contextlib
+import json
+import re
+import shutil
+import uuid
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from . import backends, db, imagegen, worker
+from .config import ROOT, settings
+
+WEB = ROOT / "web"
+SAFE = re.compile(r"[^a-z0-9\-]+")
+
+
+def slugify(text: str, fallback: str) -> str:
+    s = SAFE.sub("-", text.lower().strip()).strip("-")
+    return s[:60] or fallback
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init()
+    n = db.reset_orphans()
+    if n:
+        print(f"[plumbus] requeued {n} job(s) orphaned by the last shutdown")
+    worker.start()
+    yield
+    await worker.stop()
+
+
+app = FastAPI(title="Plumbus", version="0.1.0", lifespan=lifespan)
+
+
+# ------------------------------------------------------------------ meta
+
+@app.get("/api/backends")
+async def api_backends() -> dict[str, Any]:
+    infos = backends.describe_all()
+    default = settings.plumbus_default_backend
+    if not any(b["id"] == default and b["available"] for b in infos):
+        default = next((b["id"] for b in infos if b["available"]), default)
+    return {"backends": infos, "default": default}
+
+
+@app.get("/api/health")
+async def api_health() -> dict[str, Any]:
+    return {"ok": True, "running": worker.current_job_id()}
+
+
+# ------------------------------------------------------------------ jobs
+
+@app.post("/api/jobs")
+async def create_job(
+    files: list[UploadFile] = [],
+    backend: str = Form(...),
+    params: str = Form("{}"),
+    prompt: str = Form(""),
+    name: str = Form(""),
+    image_paths: str = Form("[]"),
+) -> dict[str, Any]:
+    try:
+        parsed: dict = json.loads(params or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, f"params is not valid JSON: {exc}") from None
+
+    try:
+        be = backends.get(backend)
+    except backends.BackendError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+    ok, reason = be.available()
+    if not ok:
+        raise HTTPException(409, reason)
+
+    ok, why = be.preflight(parsed)
+    if not ok:
+        raise HTTPException(422, why)
+
+    try:
+        reused_raw: list[str] = json.loads(image_paths or "[]")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, f"image_paths is not valid JSON: {exc}") from None
+
+    reused: list[str] = []
+    for name_only in reused_raw:
+        # Only ever reach into the upload directory, never wherever the name points.
+        cand = (settings.upload_dir / Path(name_only).name).resolve()
+        if not cand.is_file() or cand.parent != settings.upload_dir.resolve():
+            raise HTTPException(400, f"no such generated image: {name_only}")
+        reused.append(str(cand))
+
+    total = len(files) + len(reused)
+    if not total and not (be.accepts_text and prompt.strip()):
+        raise HTTPException(400, f"{be.name} needs at least one source image.")
+    image_limit = be.image_limit(parsed)
+    if total > image_limit:
+        raise HTTPException(400, f"This {be.name} configuration accepts at most {image_limit} image(s).")
+
+    job_id = db.create_job(backend, [], parsed, prompt.strip() or None)
+
+    saved: list[str] = list(reused)
+    for i, f in enumerate(files):
+        ext = Path(f.filename or "ref.png").suffix.lower() or ".png"
+        if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise HTTPException(400, f"unsupported image type {ext}")
+        dest = settings.upload_dir / f"{job_id}_{i}{ext}"
+        dest.write_bytes(await f.read())
+        saved.append(str(dest))
+
+    parsed.setdefault(
+        "_name", slugify(name or prompt or (Path(saved[0]).stem if saved else ""), job_id)
+    )
+    db.update(job_id, source_images=saved, params=parsed)
+    return {"id": job_id}
+
+
+@app.get("/api/jobs")
+async def list_jobs(limit: int = 100) -> dict[str, Any]:
+    jobs = db.list_jobs(limit=limit)
+    for j in jobs:
+        j.pop("log", None)  # keep the list payload small; fetch per job
+    return {"jobs": jobs, "running": worker.current_job_id()}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str) -> dict[str, Any]:
+    job = db.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    log = job.get("log") or ""
+    job["log"] = log[-20000:]
+    return job
+
+
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str) -> dict[str, Any]:
+    if not db.get(job_id):
+        raise HTTPException(404, "no such job")
+    db.delete(job_id)
+    return {"deleted": job_id}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str) -> dict[str, Any]:
+    job = db.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    if job["status"] == "queued":
+        db.update(job_id, status="cancelled", stage="cancelled")
+        return {"cancelled": job_id}
+    if job["status"] == "running" and worker.current_job_id() == job_id:
+        worker.cancel_current()
+        return {"cancelled": job_id}
+    raise HTTPException(409, f"job is {job['status']}, nothing to cancel")
+
+
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_job(job_id: str) -> dict[str, Any]:
+    job = db.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    new_id = db.create_job(job["backend"], job["source_images"], job["params"], job.get("prompt"))
+    return {"id": new_id}
+
+
+@app.post("/api/jobs/{job_id}/thumb")
+async def set_thumb(job_id: str, data_url: str = Form(...)) -> dict[str, Any]:
+    """The browser renders the turntable, so it also supplies the thumbnail."""
+    if not db.get(job_id):
+        raise HTTPException(404, "no such job")
+    if "," not in data_url:
+        raise HTTPException(400, "expected a data: URL")
+    raw = base64.b64decode(data_url.split(",", 1)[1])
+    dest = settings.output_dir / f"{job_id}.png"
+    dest.write_bytes(raw)
+    db.update(job_id, thumb_path=str(dest))
+    return {"thumb": f"/outputs/{dest.name}"}
+
+
+@app.post("/api/jobs/{job_id}/export")
+async def export_job(job_id: str, name: str = Form(""), category: str = Form("models")) -> dict[str, Any]:
+    """Drop the asset into the parent 3d-assets repo in its house style."""
+    job = db.get(job_id)
+    if not job or job["status"] != "done" or not job.get("glb_path"):
+        raise HTTPException(409, "job has no finished asset to export")
+
+    repo = ROOT.parent
+    slug = slugify(name or (job["params"] or {}).get("_name", ""), job_id)
+    dest_dir = repo / category / slug
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    src = Path(job["glb_path"])
+    web = src.with_name(src.stem + ".web.glb")
+    shutil.copy2(src, dest_dir / f"{slug}.glb")
+    if web.exists():
+        shutil.copy2(web, dest_dir / f"{slug}.web.glb")
+    if job.get("thumb_path") and Path(job["thumb_path"]).exists():
+        shutil.copy2(job["thumb_path"], dest_dir / "thumb.png")
+
+    stats = job.get("stats") or {}
+    (dest_dir / "README.md").write_text(
+        f"""# {slug}
+
+Generated with [Plumbus](../../plumbus) using `{stats.get('engine', job['backend'])}`.
+
+| | |
+|---|---|
+| Engine | `{stats.get('engine', job['backend'])}` |
+| Vertices | {stats.get('vertices', 'n/a')} |
+| Faces | {stats.get('faces', 'n/a')} |
+| PBR | {stats.get('pbr', 'n/a')} |
+| Size | {round(stats.get('bytes', 0) / 1024)} KB |
+| Generation time | {stats.get('seconds', 'n/a')}s |
+| Cost | ${job.get('cost_usd') or 0:.2f} |
+
+Source image: `{Path(job['source_images'][0]).name if job['source_images'] else 'n/a'}`
+""",
+        encoding="utf-8",
+    )
+    return {"exported": str(dest_dir.relative_to(repo))}
+
+
+# ------------------------------------------------------------------ reference images
+
+@app.get("/api/imagegen")
+async def api_imagegen() -> dict[str, Any]:
+    return {"providers": imagegen.describe_all()}
+
+
+@app.post("/api/imagegen")
+async def make_reference(
+    provider: str = Form("gpt-image-2"),
+    subject: str = Form(...),
+    params: str = Form("{}"),
+) -> dict[str, Any]:
+    """Draw reference images straight into the upload dir, ready to feed a job."""
+    try:
+        parsed: dict = json.loads(params or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, f"params is not valid JSON: {exc}") from None
+
+    try:
+        prov = imagegen.get(provider)
+    except imagegen.ImageError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+    ok, reason = prov.available()
+    if not ok:
+        raise HTTPException(409, reason)
+
+    views = parsed.pop("views", None) or ["three_quarter"]
+    if not isinstance(views, list):
+        raise HTTPException(400, "views must be a list")
+
+    stem = f"ref_{uuid.uuid4().hex[:8]}"
+    log: list[str] = []
+
+    async def on_event(msg: str) -> None:
+        log.append(msg)
+
+    req = imagegen.ImageRequest(
+        subject=subject,
+        out_dir=settings.upload_dir,
+        stem=stem,
+        views=views,
+        raw_prompt=bool(parsed.get("raw_prompt")),
+        params=parsed,
+    )
+    try:
+        result = await prov.generate(req, on_event)
+    except imagegen.ImageError as exc:
+        raise HTTPException(502, str(exc)) from None
+
+    return {
+        "images": [
+            {
+                "name": img.path.name,
+                "url": f"/uploads/{img.path.name}",
+                "view": img.view,
+                "label": imagegen.VIEW_LABELS.get(img.view, img.view),
+                "prompt": img.prompt,
+            }
+            for img in result.images
+        ],
+        "usage": result.usage,
+        "log": log,
+    }
+
+
+@app.get("/api/imagegen/preview")
+async def preview_prompt(
+    subject: str,
+    view: str = "three_quarter",
+    transparent: bool = True,
+    profile: str = "object",
+) -> dict[str, str]:
+    """Show what the preset actually sends, so it is not a black box."""
+    return {"prompt": imagegen.build(subject, view, transparent, profile)}
+
+
+# ------------------------------------------------------------------ static
+
+app.mount("/outputs", StaticFiles(directory=settings.output_dir), name="outputs")
+app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
+if WEB.exists():
+    app.mount("/static", StaticFiles(directory=WEB), name="static")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index() -> Any:
+    idx = WEB / "index.html"
+    if not idx.exists():
+        return JSONResponse({"error": "web/index.html missing"}, status_code=500)
+    return FileResponse(idx)
