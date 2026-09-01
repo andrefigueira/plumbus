@@ -223,6 +223,17 @@
         <p class="muted">Pick a finished asset, or generate one.</p>
       </div>
 
+      <div class="viewer-image" id="viewer-image" hidden>
+        <div class="viewer-image-frame">
+          <img id="viewer-image-main" alt="Reference image">
+          <div class="viewer-image-pending" id="viewer-image-pending" hidden>
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="viewer-image-pending-text">drawing</span>
+          </div>
+        </div>
+        <div class="viewer-image-strip" id="viewer-image-strip"></div>
+      </div>
+
       <div class="viewer-tools">
         <button data-tool="turntable" class="tool on"
                 data-tip="Turntable, slowly spin the model so you can read the silhouette from every side. Drag the canvas to orbit by hand.">⟳</button>

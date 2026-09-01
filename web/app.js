@@ -19,6 +19,9 @@ const state = {
   rig: null,           // { tree, joints, skins } for the loaded GLB, null when unrigged
   bone: null,          // selected bone uuid
   known: new Set(),    // job ids we have queued, so a poll race cannot unselect them
+  viewerImages: [],    // what the centre pane is showing when it is not showing a mesh
+  viewerSig: null,     // url signature of those images, so polling does not rebuild them
+  objectUrls: [],      // blob URLs held for the viewer, revoked on rebuild
 };
 
 const QUALITY = {
@@ -483,6 +486,13 @@ $('#btn-reference').addEventListener('click', async () => {
   refParams.asset_profile = state.profile;
   const wanted = (refParams.views || ['three_quarter']).length;
   startRefProgress(token, wanted);
+  viewer.clear();
+  state.loadedUrl = null;
+  showViewerImages([], {
+    kicker: 'Drawing',
+    name: subject.slice(0, 60),
+    pending: `drawing ${wanted} view${wanted === 1 ? '' : 's'}`,
+  });
 
   try {
     const fd = new FormData();
@@ -500,6 +510,7 @@ $('#btn-reference').addEventListener('click', async () => {
     renderThumbs();
     syncGenerate();
     setStep('reference', { focus: false });
+    previewSources({ kicker: 'Reference', name: subject.slice(0, 60) });
     toast(`${r.images.length} reference${r.images.length > 1 ? 's' : ''} ready`);
   } catch (err) {
     toast(err.message, true);
@@ -600,6 +611,7 @@ function addFiles(files) {
   if (state.step !== 'reference') setStep('reference', { focus: false });
   renderThumbs();
   syncGenerate();
+  previewSources({ kicker: 'Reference', name: `${staged()} staged` });
 }
 
 function thumbFigure(src, { caption = null, generated = false, unused = false, onRemove, onPromote }) {
@@ -634,13 +646,22 @@ function renderThumbs() {
       caption: source.label,
       generated: source.kind === 'reused',
       unused: i >= max,
-      onRemove: () => { state.sources.splice(i, 1); renderThumbs(); syncGenerate(); },
+      onRemove: () => {
+        state.sources.splice(i, 1);
+        renderThumbs();
+        syncGenerate();
+        if (state.viewerImages.length) {
+          if (staged()) previewSources({ kicker: 'Reference', name: `${staged()} staged` });
+          else hideViewerImages();
+        }
+      },
       onPromote: () => {
         if (i === 0) return;
         const [picked] = state.sources.splice(i, 1);
         state.sources.unshift(picked);
         renderThumbs();
         syncGenerate();
+        if (state.viewerImages.length) previewSources({ kicker: 'Reference', name: `${staged()} staged` });
       },
     });
     if (source.kind === 'file') fig.querySelector('img').onload = () => URL.revokeObjectURL(url);
@@ -818,6 +839,8 @@ async function loadSelected() {
       $('#viewer-empty').hidden = true;
       try {
         const info = await viewer.load(url);
+        hideViewerImages();
+        $('#viewer-empty').hidden = true;
         showStats(job, info);
         if (!job.thumb_path && !state.thumbed.has(job.id)) {
           state.thumbed.add(job.id);
@@ -835,12 +858,25 @@ async function loadSelected() {
         ? 'Waiting for the current build to finish.'
         : `${pct}% complete · live details are in Activity.`,
     );
+    // Show what this job is being built from rather than an empty stage.
+    const items = (job.source_images || []).map((path) => ({
+      url: `/uploads/${path.split('/').pop()}`,
+      label: '',
+    }));
+    if (items.length) {
+      showViewerImages(items, {
+        kicker: job.status,
+        name: displayName,
+        pending: job.status === 'queued' ? 'queued' : `${job.stage || 'building'} · ${pct}%`,
+      });
+    }
   }
 }
 
 /** Empties the viewer and every result panel. Used on queue and while running. */
 function clearResult(headline = 'Nothing loaded', detail = 'Pick a finished asset, or generate one.') {
   viewer.clear();
+  hideViewerImages();
   state.loadedUrl = null;
   state.bone = null;
   $('#viewer-empty').hidden = false;
@@ -987,6 +1023,90 @@ $$('.tool').forEach((btn) => {
     if (t === 'env') viewer.setEnv(on);
   });
 });
+
+/* ── reference images in the main viewer ───────────────────────────────── */
+
+// The centre pane is "what am I looking at right now". Before a mesh exists
+// that is the reference, not the previous asset still sitting in the scene.
+function showViewerImages(items, { kicker = null, name = null, pending = null } = {}) {
+  if (!items.length && !pending) return hideViewerImages();
+
+  $('#viewer-image').hidden = false;
+  $('#viewer-empty').hidden = true;
+  $('#viewer-image-pending').hidden = pending === null;
+  if (pending !== null) $('#viewer-image-pending-text').textContent = pending;
+
+  // A running job re-polls every 1.5s. Rebuilding the same images would reset
+  // the chosen view and flicker the main image, so only rebuild on a change.
+  const sig = items.map((i) => i.url).join('|');
+  if (sig === state.viewerSig) {
+    if (kicker) $('#viewer-kicker').textContent = kicker;
+    return;
+  }
+  state.viewerSig = sig;
+  state.viewerImages = items;
+
+  const main = $('#viewer-image-main');
+  main.hidden = !items.length;
+  if (items.length) main.src = items[0].url;
+
+  const strip = $('#viewer-image-strip');
+  strip.innerHTML = '';
+  if (items.length > 1) {
+    items.forEach((it, i) => {
+      const b = document.createElement('button');
+      b.className = 'vshot' + (i === 0 ? ' on' : '');
+      b.dataset.i = String(i);
+      b.dataset.tip = `Show the ${(it.label || 'reference').toLowerCase()} reference full size.`;
+      b.innerHTML = `<img src="${it.url}" alt="">`;
+      if (it.label) b.insertAdjacentHTML('beforeend', `<span>${it.label}</span>`);
+      b.addEventListener('click', () => {
+        main.src = it.url;
+        $$('#viewer-image-strip .vshot').forEach((x) => x.classList.toggle('on', x === b));
+      });
+      strip.appendChild(b);
+    });
+  }
+
+  if (kicker) {
+    $('#viewer-context').hidden = false;
+    $('#viewer-kicker').textContent = kicker;
+    $('#viewer-name').textContent = name || '';
+  }
+}
+
+function hideViewerImages() {
+  state.viewerImages = [];
+  state.viewerSig = null;
+  $('#viewer-image').hidden = true;
+  $('#viewer-image-strip').innerHTML = '';
+  $('#viewer-image-pending').hidden = true;
+}
+
+function releaseObjectUrls() {
+  for (const u of state.objectUrls) URL.revokeObjectURL(u);
+  state.objectUrls = [];
+}
+
+/** The references currently staged, as things the viewer can display. */
+function sourceItems() {
+  releaseObjectUrls();
+  return activeSources().map((src) => {
+    if (src.kind !== 'file') return { url: src.url, label: src.label || '' };
+    const url = URL.createObjectURL(src.file);
+    state.objectUrls.push(url);
+    return { url, label: src.file.name };
+  });
+}
+
+/** Put the staged references on screen, replacing whatever mesh was there. */
+function previewSources({ kicker = 'Reference', name = '' } = {}) {
+  const items = sourceItems();
+  if (!items.length) return;
+  viewer.clear();
+  state.loadedUrl = null;
+  showViewerImages(items, { kicker, name });
+}
 
 /* ── rig panel ─────────────────────────────────────────────────────────── */
 
