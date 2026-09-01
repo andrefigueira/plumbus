@@ -223,6 +223,7 @@ async def prepare(
     target_height: float | None = None,
     target_tris: int | None = None,
     texture_size: int | None = None,
+    detail_normals: bool = True,
 ) -> dict[str, Any]:
     """Full pass: real-world scale, origin at the base, triangle budget, compressed.
 
@@ -250,6 +251,20 @@ async def prepare(
     except Exception as exc:  # noqa: BLE001
         shutil.copy2(src, staging)
         notes.append(f"placement skipped ({exc.__class__.__name__}: {exc})")
+
+    if detail_normals:
+        # Perceived detail in-engine is mostly the normal map, and generation
+        # ships none. Derived from the albedo; authored maps are never touched.
+        try:
+            from .detailmap import add_detail_normals
+
+            d = add_detail_normals(staging)
+            notes.append(
+                f"detail: normal map derived from the {d.get('texture_px', ['?'])[0]}px albedo"
+                if d.get("materials_touched") else f"detail: skipped, {d.get('reason')}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"detail: skipped ({exc.__class__.__name__}: {exc})")
 
     current = before.get("faces")
     ok, msg, after = False, "", {}

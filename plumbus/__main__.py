@@ -5,6 +5,7 @@
     plumbus install trellis       clone + set up a local engine
     plumbus gen ref.png           one-shot generate without the UI
     plumbus mcp                   MCP server over stdio, for agents
+    plumbus conform scan.glb      fit the rigged template head onto a scan
 """
 from __future__ import annotations
 
@@ -306,6 +307,17 @@ def cmd_mcp(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_conform(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .conform import conform_head
+
+    out = Path(args.out or Path(args.scan).with_name(Path(args.scan).stem + ".riggable.glb"))
+    report = conform_head(Path(args.scan), out, Path(args.template) if args.template else None)
+    print(_json.dumps(report, indent=2))
+    return 0 if report.get("ok") else 1
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -335,6 +347,12 @@ def main() -> int:
 
     m = sub.add_parser("mcp", help="MCP server over stdio (needs `plumbus serve` running)")
     m.set_defaults(fn=cmd_mcp)
+
+    c = sub.add_parser("conform", help="fit the rigged template head onto a head scan")
+    c.add_argument("scan", help="generated head GLB (the mould)")
+    c.add_argument("--template", help="rigged template GLB (default: templates/basehead-stub.glb)")
+    c.add_argument("--out", help="output GLB (default: <scan>.riggable.glb)")
+    c.set_defaults(fn=cmd_conform)
 
     g = sub.add_parser("gen", help="generate one asset, no UI")
     g.add_argument("images", nargs="+")

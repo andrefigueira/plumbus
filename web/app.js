@@ -1774,6 +1774,10 @@ async function refresh() {
   } catch { /* server restarting; the next tick will catch up */ }
 }
 
+// Dev/agent hook: the console and driven browsers can reach the running app.
+// Nothing in the app itself uses this.
+window.plumbus = { viewer, state };
+
 loadSetup();
 applyProfile();
 setStep('define', { focus: false });
