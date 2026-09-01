@@ -19,6 +19,10 @@ class ImageRequest:
     out_dir: Path
     stem: str
     views: list[str] = field(default_factory=lambda: ["three_quarter"])
+    # Head-framed close-ups derived from the base view AFTER the body set, drawn
+    # at 2048 regardless of the body size because face texel density is their
+    # entire reason to exist. Named face_<view> in the output.
+    face_views: list[str] = field(default_factory=list)
     raw_prompt: bool = False
     params: dict[str, Any] = field(default_factory=dict)
 

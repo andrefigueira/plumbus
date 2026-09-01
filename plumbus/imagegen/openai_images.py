@@ -337,5 +337,29 @@ class GPTImage2Provider(ImageProvider):
                     else:
                         images.append(res)
 
+            face = [v for v in req.face_views if v in VIEW_LABELS][:3]
+            if face:
+                await on_event(f"deriving {len(face)} face close-up(s) from it")
+                # The whole point is resolution on the face, so these ignore the
+                # body size and draw at 2048. Identity holds because the edit
+                # carries the base image, same as the extra body views.
+                face_params = {**p, "size": "2048x2048"}
+
+                async def one_face(view: str) -> GeneratedImage:
+                    prompt = build_view_edit(req.subject, view, transparent, "head")
+                    dest = req.out_dir / f"{req.stem}_face_{view}.png"
+                    tally(await self._edit_view(client, prompt, face_params, base_path, dest, on_event))
+                    await on_event(f"[view] face {VIEW_LABELS[view]} ready")
+                    return GeneratedImage(dest, f"face_{view}", prompt)
+
+                face_results = await asyncio.gather(
+                    *(one_face(v) for v in face), return_exceptions=True
+                )
+                for view, res in zip(face, face_results):
+                    if isinstance(res, Exception):
+                        await on_event(f"face {VIEW_LABELS[view]} failed: {res}")
+                    else:
+                        images.append(res)
+
         await on_event(f"done, {len(images)} image(s)")
         return ImageResult(images=images, usage=usage_total)

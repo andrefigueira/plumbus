@@ -39,6 +39,23 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Plumbus", version="0.1.0", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def no_stale_ui(request, call_next):
+    """The UI must never be a version behind the server.
+
+    Twice in one day a hard-to-explain bug was really the browser holding
+    yesterday's app.js against today's endpoints: a form that reset itself, and
+    a feature that half-existed. This is a local tool whose assets change many
+    times a session, so /static and / revalidate every load. no-cache still
+    permits conditional requests, so unchanged files cost a 304, not a refetch.
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/static"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # ------------------------------------------------------------------ meta
 
 @app.get("/api/backends")
@@ -331,6 +348,9 @@ async def make_reference(
     views = parsed.pop("views", None) or ["three_quarter"]
     if not isinstance(views, list):
         raise HTTPException(400, "views must be a list")
+    face_views = parsed.pop("face_views", None) or []
+    if not isinstance(face_views, list):
+        raise HTTPException(400, "face_views must be a list")
 
     stem = f"ref_{uuid.uuid4().hex[:8]}"
     log: list[str] = []
@@ -340,8 +360,8 @@ async def make_reference(
         while len(REF_PROGRESS) >= REF_PROGRESS_MAX:
             REF_PROGRESS.pop(next(iter(REF_PROGRESS)))
         REF_PROGRESS[token] = {
-            "done": 0, "total": len(views), "stage": "starting", "finished": False,
-            "preview": None, "rev": 0,
+            "done": 0, "total": len(views) + len(face_views), "stage": "starting",
+            "finished": False, "preview": None, "rev": 0,
         }
 
     async def on_event(msg: str) -> None:
@@ -369,6 +389,7 @@ async def make_reference(
         out_dir=settings.upload_dir,
         stem=stem,
         views=views,
+        face_views=face_views,
         raw_prompt=bool(parsed.get("raw_prompt")),
         params=parsed,
     )
@@ -383,13 +404,20 @@ async def make_reference(
         if entry is not None:
             entry["finished"] = True
 
+    def label_for(view: str) -> str:
+        if view.startswith("face_"):
+            base = view[5:]
+            return f"Face · {imagegen.VIEW_LABELS.get(base, base)}"
+        return imagegen.VIEW_LABELS.get(view, view)
+
     return {
         "images": [
             {
                 "name": img.path.name,
                 "url": f"/uploads/{img.path.name}",
                 "view": img.view,
-                "label": imagegen.VIEW_LABELS.get(img.view, img.view),
+                "role": "face" if img.view.startswith("face_") else "body",
+                "label": label_for(img.view),
                 "prompt": img.prompt,
             }
             for img in result.images

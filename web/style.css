@@ -1395,3 +1395,6 @@ button {
   color: var(--ink-faint);
 }
 .draw-cost.dear { color: var(--warn); }
+
+/* Face close-up thumbs read as companions to the body set, not overflow. */
+.thumbs figure.gen figcaption { letter-spacing: .02em; }

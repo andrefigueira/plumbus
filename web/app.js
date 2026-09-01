@@ -303,7 +303,10 @@ function estimateDrawCost() {
   if (!rate) return null;
   const [w, h] = size === 'auto' ? [1024, 1024] : size.split('x').map(Number);
   const area = (w * h) / RATE_BASE_PX;
-  return { total: rate * area * views, views, quality: q, size };
+  // The face close-ups always draw at 2048, whatever the body views use.
+  const faceViews = (PROFILES[state.profile]?.faceViews || []).length;
+  const face = faceViews * rate * ((2048 * 2048) / RATE_BASE_PX);
+  return { total: rate * area * views + face, views, faceViews, quality: q, size };
 }
 
 function syncDrawCost() {
@@ -311,10 +314,10 @@ function syncDrawCost() {
   if (!el) return;
   const est = estimateDrawCost();
   if (!est || !state.imgProvider?.available) { el.textContent = ''; return; }
-  const each = est.total / est.views;
+  const facePart = est.faceViews ? ` + ${est.faceViews} face @2048` : '';
   el.textContent =
-    `${est.views} view${est.views === 1 ? '' : 's'} · ${est.quality} · ${est.size} ` +
-    `≈ $${est.total.toFixed(2)} (about $${each.toFixed(2)} each)`;
+    `${est.views} view${est.views === 1 ? '' : 's'} · ${est.quality} · ${est.size}${facePart} ` +
+    `≈ $${est.total.toFixed(2)}`;
   el.classList.toggle('dear', est.total >= 1);
 }
 
@@ -329,6 +332,11 @@ const PROFILES = {
   character: {
     // Anything headed for retopology keeps its edge flow, so no filling.
     preserveDeformation: true, repairHoles: false, dropFragments: 0,
+    // A character has a face, so the face pass is part of the draw, not a
+    // separate profile you have to know about: head-framed close-ups derived
+    // from the same base image, drawn at 2048, and built as their own head
+    // asset alongside the body when you generate.
+    faceViews: ['front', 'left'],
     views: ['front', 'left', 'back', 'three_quarter'], base: 'front', size: '1024x1024',
     placeholder: 'Full-body realistic character, age, facial identity, clothing and materials',
     hint: 'Use a full-body neutral A-pose with visible hands and feet. Front, profile and back views give the best foundation for retopology and rigging.',
@@ -560,7 +568,8 @@ $('#btn-reference').addEventListener('click', async () => {
   const token = `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   const refParams = collectParams($('#ref-params'), { extras: false });
   refParams.asset_profile = state.profile;
-  const wanted = (refParams.views || ['three_quarter']).length;
+  refParams.face_views = PROFILES[state.profile]?.faceViews || [];
+  const wanted = (refParams.views || ['three_quarter']).length + refParams.face_views.length;
   startRefProgress(token, wanted, Number(refParams.partials ?? 0) || 0);
   viewer.clear();
   state.loadedUrl = null;
@@ -579,7 +588,7 @@ $('#btn-reference').addEventListener('click', async () => {
 
     const r = await api('/api/imagegen', { method: 'POST', body: fd });
     // Generated references replace whatever was staged; mixing sets rarely helps.
-    state.sources = r.images.map((img) => ({ ...img, kind: 'reused' }));
+    state.sources = r.images.map((img) => ({ ...img, kind: 'reused', role: img.role || 'body' }));
     if (!$('#asset-name').value.trim()) {
       $('#asset-name').value = subject.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40).replace(/^-|-$/g, '');
     }
@@ -696,7 +705,11 @@ function sourceLimit() {
 }
 
 function activeSources() {
-  return state.sources.slice(0, sourceLimit());
+  return state.sources.filter((s) => s.role !== 'face').slice(0, sourceLimit());
+}
+
+function faceSources() {
+  return state.sources.filter((s) => s.role === 'face');
 }
 
 function staged() {
@@ -742,12 +755,16 @@ function renderThumbs() {
   wrap.innerHTML = '';
   const max = sourceLimit();
 
+  let bodyIndex = 0;
   state.sources.forEach((source, i) => {
     const url = source.kind === 'file' ? URL.createObjectURL(source.file) : source.url;
+    const isFace = source.role === 'face';
     const fig = thumbFigure(url, {
       caption: source.label,
       generated: source.kind === 'reused',
-      unused: i >= max,
+      // Face close-ups feed the head asset, not the body mesh, so they never
+      // occupy or overflow the engine's body-image slots.
+      unused: !isFace && bodyIndex++ >= max,
       onRemove: () => {
         state.sources.splice(i, 1);
         renderThumbs();
@@ -770,8 +787,12 @@ function renderThumbs() {
     wrap.appendChild(fig);
   });
 
-  const used = Math.min(max, state.sources.length);
-  $('#source-count').textContent = state.sources.length ? `${used} of ${state.sources.length} used` : '';
+  const bodies = state.sources.filter((x) => x.role !== 'face').length;
+  const faces = state.sources.length - bodies;
+  const used = Math.min(max, bodies);
+  $('#source-count').textContent = state.sources.length
+    ? `${used} of ${bodies} used${faces ? ` · ${faces} face` : ''}`
+    : '';
 }
 
 function syncGenerate() {
@@ -785,7 +806,10 @@ function syncGenerate() {
     : !ready
       ? 'Add a reference to continue'
       : `${staged()} reference${staged() === 1 ? '' : 's'} · ${b.name}`;
-  $('#btn-generate').firstChild.textContent = ready ? `Generate ${profile} ` : 'Generate asset ';
+  const twoAssets = ready && faceSources().length > 0;
+  $('#btn-generate').firstChild.textContent = ready
+    ? twoAssets ? 'Generate character + head ' : `Generate ${profile} `
+    : 'Generate asset ';
   $('#gen-note').textContent = b
     ? b.kind === 'hosted'
       ? 'Billed per generation by fal.ai.'
@@ -808,6 +832,7 @@ function renderRunSummary() {
     ['Quality', QUALITY[state.quality].label],
     ['Engine', b ? `${b.name} (${b.kind})` : 'none usable'],
     ['References', staged() ? `${staged()} image${staged() === 1 ? '' : 's'}` : b?.accepts_text ? 'text only' : 'none'],
+    ...(faceSources().length ? [['Face pass', `${faceSources().length} close-up${faceSources().length === 1 ? '' : 's'} → separate head asset`]] : []),
     ['Topology', $('#preserve-deformation').checked ? 'deformation preserved' : 'static cleanup'],
     ['Web copy', $('#web-optimize').checked ? 'Draco + WebP' : 'source only'],
   ];
@@ -834,11 +859,41 @@ $('#btn-generate').addEventListener('click', async () => {
     for (const source of sources.filter((s) => s.kind === 'file')) fd.append('files', source.file);
 
     const { id } = await api('/api/jobs', { method: 'POST', body: fd });
-    toast(`Queued ${id}`);
+
+    // A character with a face gets its head built as a matter of course: same
+    // engine, the face close-ups as sources, head finishing settings, queued
+    // right behind the body in the single-slot worker.
+    const faces = faceSources();
+    let headId = null;
+    if (faces.length) {
+      const name = $('#asset-name').value.trim();
+      const headParams = {
+        ...collectParams($('#params')),
+        repair_holes: true,
+        preserve_deformation: false,
+        drop_fragments_below: 0.002,
+        _profile: 'head',
+      };
+      const fd2 = new FormData();
+      fd2.append('backend', engine.id);
+      fd2.append('params', JSON.stringify(headParams));
+      fd2.append('name', name ? `${name}-head` : 'head');
+      // The engine's image limit applies to this job too; the front close-up
+      // is first in the set, so slicing keeps the view that matters most.
+      fd2.append('image_paths', JSON.stringify(faces.slice(0, sourceLimit()).map((s) => s.name)));
+      try {
+        headId = (await api('/api/jobs', { method: 'POST', body: fd2 })).id;
+      } catch (err) {
+        toast(`Head asset not queued: ${err.message}`, true);
+      }
+    }
+
+    toast(headId ? `Queued body ${id} + head ${headId}` : `Queued ${id}`);
     // Drop the previous asset now. Waiting for the poll leaves the last mesh
     // on screen looking like it is the thing being built.
     state.selected = id;
     state.known.add(id);
+    if (headId) state.known.add(headId);
     clearResult(`queued ${id}`);
     await refresh();
   } catch (err) {
@@ -1278,10 +1333,12 @@ function releaseObjectUrls() {
   state.objectUrls = [];
 }
 
-/** The references currently staged, as things the viewer can display. */
+/** Everything staged, as things the viewer can display. The centre pane shows
+ *  the whole set, face close-ups included; which of them feed which engine is
+ *  the queue's business, not the preview's. */
 function sourceItems() {
   releaseObjectUrls();
-  return activeSources().map((src) => {
+  return state.sources.map((src) => {
     if (src.kind !== 'file') return { url: src.url, label: src.label || '' };
     const url = URL.createObjectURL(src.file);
     state.objectUrls.push(url);
