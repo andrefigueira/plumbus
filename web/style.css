@@ -78,11 +78,9 @@ body {
 }
 
 .mark {
-  width: 11px; height: 11px;
-  border-radius: 50% 50% 50% 20%;
-  background: var(--accent);
+  width: 18px; height: 18px;
+  object-fit: contain;
   align-self: center;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .tag {
@@ -929,7 +927,13 @@ button {
   font-size: 11px;
   color: var(--ink-faint);
 }
-.wizard-foot button { flex: 0 0 auto; }
+.wizard-foot button {
+  flex: 0 0 auto;
+  width: auto;
+  margin-top: 0;
+  padding: 6px 12px;
+  font-size: 11.5px;
+}
 .wizard-foot button[hidden] { display: none; }
 
 /* the dock no longer needs to float; step 4 is short */
@@ -1087,4 +1091,44 @@ button {
   border-radius: 50%;
   background: var(--good);
   vertical-align: middle;
+}
+
+/* ── reference drawing progress ────────────────────────────────────────── */
+
+.ref-progress { margin-top: 10px; }
+.ref-progress[hidden] { display: none; }
+.ref-progress-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+  font: 10px/1.4 var(--mono);
+  color: var(--ink-faint);
+}
+.ref-progress-top b { color: var(--accent); font-weight: 600; }
+.ref-progress-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--bg-sunk);
+  overflow: hidden;
+}
+.ref-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width .4s ease-out;
+}
+/* Motion on the bar so a long single-view draw never looks frozen. */
+.ref-progress-fill::after {
+  content: '';
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / .45), transparent);
+  animation: ref-sheen 1.3s linear infinite;
+}
+@keyframes ref-sheen {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
 }

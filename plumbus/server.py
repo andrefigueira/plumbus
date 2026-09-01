@@ -235,11 +235,23 @@ async def api_imagegen() -> dict[str, Any]:
     return {"providers": imagegen.describe_all()}
 
 
+# Reference drawing is one blocking call, so the only way the browser can show
+# real progress is a side channel it polls. Keyed by a token the client makes up.
+REF_PROGRESS: dict[str, dict[str, Any]] = {}
+REF_PROGRESS_MAX = 32
+
+
+@app.get("/api/imagegen/progress/{token}")
+async def ref_progress(token: str) -> dict[str, Any]:
+    return REF_PROGRESS.get(token) or {"done": 0, "total": 0, "stage": "", "finished": False}
+
+
 @app.post("/api/imagegen")
 async def make_reference(
     provider: str = Form("gpt-image-2"),
     subject: str = Form(...),
     params: str = Form("{}"),
+    token: str = Form(""),
 ) -> dict[str, Any]:
     """Draw reference images straight into the upload dir, ready to feed a job."""
     try:
@@ -263,8 +275,26 @@ async def make_reference(
     stem = f"ref_{uuid.uuid4().hex[:8]}"
     log: list[str] = []
 
+    if token:
+        # Cheap bound; these entries are tiny and short-lived.
+        while len(REF_PROGRESS) >= REF_PROGRESS_MAX:
+            REF_PROGRESS.pop(next(iter(REF_PROGRESS)))
+        REF_PROGRESS[token] = {
+            "done": 0, "total": len(views), "stage": "starting", "finished": False,
+        }
+
     async def on_event(msg: str) -> None:
         log.append(msg)
+        if not token:
+            return
+        entry = REF_PROGRESS.get(token)
+        if entry is None:
+            return
+        if msg.startswith("[view] "):
+            entry["done"] = min(entry["done"] + 1, entry["total"])
+            entry["stage"] = msg[7:]
+        else:
+            entry["stage"] = msg
 
     req = imagegen.ImageRequest(
         subject=subject,
@@ -277,7 +307,13 @@ async def make_reference(
     try:
         result = await prov.generate(req, on_event)
     except imagegen.ImageError as exc:
+        if token:
+            REF_PROGRESS.pop(token, None)
         raise HTTPException(502, str(exc)) from None
+    finally:
+        entry = REF_PROGRESS.get(token) if token else None
+        if entry is not None:
+            entry["finished"] = True
 
     return {
         "images": [

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Plumbus</title>
 <link rel="stylesheet" href="/static/style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🫀</text></svg>">
+<link rel="icon" type="image/png" href="/static/favicon.png">
 <script type="importmap">
 { "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
@@ -17,7 +17,7 @@
 
 <header class="bar">
   <div class="brand">
-    <span class="mark" aria-hidden="true"></span>
+    <img class="mark" src="/static/logo.png" alt="" width="18" height="18">
     <h1>Plumbus</h1>
     <span class="tag">everyone has one in their home</span>
   </div>
@@ -37,19 +37,19 @@
 
     <nav class="wizard" id="wizard" role="tablist" aria-label="Build steps">
       <button class="wstep on" data-step="define" role="tab" aria-selected="true"
-              data-tip="Step 1 — pick Object or Character and describe the subject you want a reference drawn for.">
+              data-tip="Step 1, pick Object or Character and describe the subject you want a reference drawn for.">
         <span class="wnum">1</span><b>Define</b>
       </button>
       <button class="wstep" data-step="reference" role="tab" aria-selected="false"
-              data-tip="Step 2 — the source images the mesh is built from. Drop your own, or use the ones drawn in step 1.">
+              data-tip="Step 2, the source images the mesh is built from. Drop your own, or use the ones drawn in step 1.">
         <span class="wnum">2</span><b>Reference</b>
       </button>
       <button class="wstep" data-step="build" role="tab" aria-selected="false"
-              data-tip="Step 3 — choose the engine and how much geometry and texture detail to spend time on.">
+              data-tip="Step 3, choose the engine and how much geometry and texture detail to spend time on.">
         <span class="wnum">3</span><b>Build</b>
       </button>
       <button class="wstep" data-step="run" role="tab" aria-selected="false"
-              data-tip="Step 4 — name the asset and queue the generation.">
+              data-tip="Step 4, name the asset and queue the generation.">
         <span class="wnum">4</span><b>Run</b>
       </button>
     </nav>
@@ -66,11 +66,11 @@
         <div class="refgen">
           <div class="profile-switch" id="profile-switch" aria-label="Asset profile">
             <button type="button" data-profile="object" class="on"
-                    data-tip="Object — reproduces surfaces faithfully and closes pinholes. Best for props, hard-surface and set dressing.">
+                    data-tip="Object, reproduces surfaces faithfully and closes pinholes. Best for props, hard-surface and set dressing.">
               <b>Object</b><span>faithful surfaces</span>
             </button>
             <button type="button" data-profile="character"
-                    data-tip="Character — A-pose references, anatomy constraints, and deformation-safe topology kept intact for later rigging.">
+                    data-tip="Character, A-pose references, anatomy constraints, and deformation-safe topology kept intact for later rigging.">
               <b>Character</b><span>rig-friendly base</span>
             </button>
           </div>
@@ -82,6 +82,14 @@
           <div id="ref-params" class="params"></div>
           <button id="btn-reference" class="secondary" disabled
                   data-tip="Draw reference images with GPT Image 2 and drop them straight into step 2.">Generate reference</button>
+
+          <div id="ref-progress" class="ref-progress" hidden>
+            <div class="ref-progress-top">
+              <span id="ref-progress-stage">starting</span>
+              <b id="ref-progress-pct">0%</b>
+            </div>
+            <div class="ref-progress-track"><div id="ref-progress-fill" class="ref-progress-fill"></div></div>
+          </div>
           <details class="ref-peek">
             <summary data-tip="Read the exact prompt sent to the image model, preset and all.">See the prompt actually sent</summary>
             <pre id="ref-prompt" class="ref-prompt"></pre>
@@ -126,13 +134,13 @@
           <span class="field-label">Quality</span>
           <div class="quality-switch" id="quality-switch" aria-label="Quality preset">
             <button type="button" data-quality="preview"
-                    data-tip="Preview — low-resolution geometry for a fast silhouette and framing check. Roughly a minute.">
+                    data-tip="Preview, low-resolution geometry for a fast silhouette and framing check. Roughly a minute.">
               <b>Preview</b><span>fast</span></button>
             <button type="button" data-quality="detailed" class="on"
-                    data-tip="Detailed — 1024 geometry and 2K textures. The right default for a final asset.">
+                    data-tip="Detailed, 1024 geometry and 2K textures. The right default for a final asset.">
               <b>Detailed</b><span>balanced</span></button>
             <button type="button" data-quality="hero"
-                    data-tip="Hero — cascade/max-resolution geometry and a dense source GLB. Longest run, best foundation for retopology.">
+                    data-tip="Hero, cascade/max-resolution geometry and a dense source GLB. Longest run, best foundation for retopology.">
               <b>Hero</b><span>maximum</span></button>
           </div>
           <p id="quality-note" class="help-copy"></p>
@@ -217,21 +225,21 @@
 
       <div class="viewer-tools">
         <button data-tool="turntable" class="tool on"
-                data-tip="Turntable — slowly spin the model so you can read the silhouette from every side. Drag the canvas to orbit by hand.">⟳</button>
+                data-tip="Turntable, slowly spin the model so you can read the silhouette from every side. Drag the canvas to orbit by hand.">⟳</button>
         <button data-tool="wire" class="tool"
-                data-tip="Wireframe — draw the triangle edges. This is how you see whether the topology is a clean shell or a noisy soup.">△</button>
+                data-tip="Wireframe, draw the triangle edges. This is how you see whether the topology is a clean shell or a noisy soup.">△</button>
         <button data-tool="bones" class="tool" disabled
-                data-tip="Skeleton — overlay the joint hierarchy on the mesh. Enabled only when the GLB actually carries a skeleton; the Rig tab below says what is missing.">⌁</button>
+                data-tip="Skeleton, overlay the joint hierarchy on the mesh. Enabled only when the GLB actually carries a skeleton; the Rig tab below says what is missing.">⌁</button>
         <button data-tool="joints" class="tool" disabled
-                data-tip="Joint markers — draw a dot at every joint pivot and let you click one to select it. Pairs with the bone tree in the Rig tab.">◇</button>
+                data-tip="Joint markers, draw a dot at every joint pivot and let you click one to select it. Pairs with the bone tree in the Rig tab.">◇</button>
         <button data-tool="grid" class="tool on"
-                data-tip="Ground grid — a one-metre reference grid and the shadow catcher. Turn it off for a clean screenshot.">▦</button>
+                data-tip="Ground grid, a one-metre reference grid and the shadow catcher. Turn it off for a clean screenshot.">▦</button>
         <button data-tool="env" class="tool on"
-                data-tip="Environment lighting — image-based light that shows how the material reads. Off falls back to a single hard key light.">◍</button>
+                data-tip="Environment lighting, image-based light that shows how the material reads. Off falls back to a single hard key light.">◍</button>
         <button data-tool="frame" class="tool"
-                data-tip="Reframe — snap the camera back to fit the whole model after you have orbited away.">⤢</button>
+                data-tip="Reframe, snap the camera back to fit the whole model after you have orbited away.">⤢</button>
         <button data-tool="shot" class="tool"
-                data-tip="Save thumbnail — render a square three-quarter shot and store it as this asset's card image.">◉</button>
+                data-tip="Save thumbnail, render a square three-quarter shot and store it as this asset's card image.">◉</button>
       </div>
 
       <div class="viewer-stats" id="viewer-stats"></div>

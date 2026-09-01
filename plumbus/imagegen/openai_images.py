@@ -195,6 +195,7 @@ class GPTImage2Provider(ImageProvider):
             base_path = req.out_dir / f"{req.stem}_{base_view}.png"
             tally(await self._generate_one(client, base_prompt, p, base_path))
             images.append(GeneratedImage(base_path, base_view, base_prompt))
+            await on_event(f"[view] {VIEW_LABELS[base_view]} ready")
 
             if rest:
                 await on_event(f"deriving {len(rest)} more view(s) from it")
@@ -203,6 +204,8 @@ class GPTImage2Provider(ImageProvider):
                     prompt = build_view_edit(req.subject, view, transparent, profile)
                     dest = req.out_dir / f"{req.stem}_{view}.png"
                     tally(await self._edit_view(client, prompt, p, base_path, dest))
+                    # These run concurrently, so report each as it lands.
+                    await on_event(f"[view] {VIEW_LABELS[view]} ready")
                     return GeneratedImage(dest, view, prompt)
 
                 results = await asyncio.gather(

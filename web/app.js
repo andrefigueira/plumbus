@@ -18,6 +18,7 @@ const state = {
   resultTab: 'inspect',
   rig: null,           // { tree, joints, skins } for the loaded GLB, null when unrigged
   bone: null,          // selected bone uuid
+  known: new Set(),    // job ids we have queued, so a poll race cannot unselect them
 };
 
 const QUALITY = {
@@ -477,13 +478,18 @@ $('#btn-reference').addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = 'Drawing…';
 
+  const token = `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const refParams = collectParams($('#ref-params'), { extras: false });
+  refParams.asset_profile = state.profile;
+  const wanted = (refParams.views || ['three_quarter']).length;
+  startRefProgress(token, wanted);
+
   try {
     const fd = new FormData();
     fd.append('provider', state.imgProvider.id);
     fd.append('subject', subject);
-    const refParams = collectParams($('#ref-params'), { extras: false });
-    refParams.asset_profile = state.profile;
     fd.append('params', JSON.stringify(refParams));
+    fd.append('token', token);
 
     const r = await api('/api/imagegen', { method: 'POST', body: fd });
     // Generated references replace whatever was staged; mixing sets rarely helps.
@@ -498,10 +504,52 @@ $('#btn-reference').addEventListener('click', async () => {
   } catch (err) {
     toast(err.message, true);
   } finally {
+    stopRefProgress();
     btn.disabled = false;
     btn.textContent = was;
   }
 });
+
+/* ── reference drawing progress ────────────────────────────────────────── */
+
+// The draw is one blocking POST, so real progress comes from polling a token
+// the server updates as each view lands.
+let refPoll = null;
+
+function startRefProgress(token, total) {
+  const box = $('#ref-progress');
+  box.hidden = false;
+  paintRefProgress(0, total, 'starting');
+
+  const started = Date.now();
+  const tick = async () => {
+    try {
+      const p = await api(`/api/imagegen/progress/${token}`);
+      // Before the first view lands, creep the bar on elapsed time so it is
+      // never frozen, but never let the guess overtake a real completion.
+      const guess = Math.min(0.55, (Date.now() - started) / 42000);
+      paintRefProgress(p.done || 0, p.total || total, p.stage || 'drawing', guess);
+    } catch { /* the POST is the source of truth; a missed poll is harmless */ }
+  };
+  tick();
+  refPoll = setInterval(tick, 700);
+}
+
+function paintRefProgress(done, total, stage, guess = 0) {
+  const real = total ? done / total : 0;
+  const frac = Math.max(real, real === 0 ? guess : 0);
+  $('#ref-progress-fill').style.width = `${Math.round(frac * 100)}%`;
+  $('#ref-progress-pct').textContent = `${Math.round(frac * 100)}%`;
+  $('#ref-progress-stage').textContent =
+    total > 1 ? `${stage} · ${done} of ${total} views` : stage;
+}
+
+function stopRefProgress() {
+  clearInterval(refPoll);
+  refPoll = null;
+  $('#ref-progress').hidden = true;
+  $('#ref-progress-fill').style.width = '0%';
+}
 
 /* ── source images ─────────────────────────────────────────────────────── */
 
@@ -664,7 +712,11 @@ $('#btn-generate').addEventListener('click', async () => {
 
     const { id } = await api('/api/jobs', { method: 'POST', body: fd });
     toast(`Queued ${id}`);
+    // Drop the previous asset now. Waiting for the poll leaves the last mesh
+    // on screen looking like it is the thing being built.
     state.selected = id;
+    state.known.add(id);
+    clearResult(`queued ${id}`);
     await refresh();
   } catch (err) {
     toast(err.message, true);
@@ -776,21 +828,32 @@ async function loadSelected() {
       }
     }
   } else {
-    viewer.clear();
-    state.loadedUrl = null;
-    $('#viewer-empty').hidden = false;
-    $('#viewer-stats').innerHTML = '';
     const pct = Math.round((job.progress || 0) * 100);
-    $('#inspect').className = 'inspect empty-inspect';
-    $('#inspect').innerHTML = `<div class="inspect-empty"><b>${job.stage || job.status}</b><br>${job.status === 'queued' ? 'Waiting for the current build to finish.' : `${pct}% complete · live details are in Activity.`}</div>`;
-    $('#rig').className = 'rig rig-empty';
-    $('#rig').innerHTML = '<div class="rig-none"><h3>Nothing to rig yet</h3><p>The skeleton browser opens once a build finishes.</p></div>';
-    state.bone = null;
-    for (const tool of ['bones', 'joints']) {
-      const btn = $(`[data-tool="${tool}"]`);
-      btn.disabled = true;
-      btn.classList.remove('on');
-    }
+    clearResult(
+      job.stage || job.status,
+      job.status === 'queued'
+        ? 'Waiting for the current build to finish.'
+        : `${pct}% complete · live details are in Activity.`,
+    );
+  }
+}
+
+/** Empties the viewer and every result panel. Used on queue and while running. */
+function clearResult(headline = 'Nothing loaded', detail = 'Pick a finished asset, or generate one.') {
+  viewer.clear();
+  state.loadedUrl = null;
+  state.bone = null;
+  $('#viewer-empty').hidden = false;
+  $('#viewer-stats').innerHTML = '';
+  $('#inspect').className = 'inspect empty-inspect';
+  $('#inspect').innerHTML = `<div class="inspect-empty"><b>${headline}</b><br>${detail}</div>`;
+  $('#rig').className = 'rig rig-empty';
+  $('#rig').innerHTML = '<div class="rig-none"><h3>Nothing to rig yet</h3><p>The skeleton browser opens once a build finishes.</p></div>';
+  $('#tab-rig').classList.remove('has-rig');
+  for (const tool of ['bones', 'joints']) {
+    const btn = $(`[data-tool="${tool}"]`);
+    btn.disabled = true;
+    btn.classList.remove('on');
   }
 }
 
@@ -1121,11 +1184,12 @@ async function refresh() {
     pill.className = 'pill ' + (busy ? 'pill-busy' : 'pill-idle');
 
     const current = data.jobs.find((j) => j.id === state.selected);
-    if (!current) {
+    if (!current && !state.known.has(state.selected)) {
       const running = data.jobs.find((j) => j.status === 'running');
       const done = data.jobs.find((j) => j.status === 'done');
       state.selected = running?.id || done?.id || data.jobs[0]?.id || null;
     }
+    if (current) state.known.delete(state.selected);
     renderQueue();
     await loadSelected();
   } catch { /* server restarting; the next tick will catch up */ }
