@@ -123,6 +123,24 @@ plumbus gen ref.png --set pipeline_type=1024 --set texture_size=2048
 plumbus doctor
 ```
 
+### Agents (MCP)
+
+Plumbus speaks MCP, so a Claude session can make assets directly:
+
+```sh
+plumbus serve          # the MCP server drives this over HTTP
+claude mcp add -s user plumbus /path/to/plumbus/.venv/bin/python -- -m plumbus mcp
+```
+
+The repo also ships a project-scope `.mcp.json`, so opening it in Claude Code
+offers the server automatically. Tools: `text_to_asset` goes from a description
+to queued job(s) in one call (a character gets its head job queued too),
+`draw_reference` / `create_asset` split the same flow, `wait_for_job`,
+`job_status`, `list_assets`, `cancel_job`, `export_asset` (the game-ready
+finisher) and `engine_status`. Reference drawing spends real money, and the
+tool descriptions say so; builds run through the same single-slot worker as
+the UI, so the browser shows whatever an agent is doing.
+
 ## Getting good meshes
 
 Text-to-3D is the weakest path in every engine, open or hosted. Image first:

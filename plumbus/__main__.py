@@ -4,6 +4,7 @@
     plumbus doctor                what is installed, what is not
     plumbus install trellis       clone + set up a local engine
     plumbus gen ref.png           one-shot generate without the UI
+    plumbus mcp                   MCP server over stdio, for agents
 """
 from __future__ import annotations
 
@@ -297,6 +298,14 @@ def cmd_gen(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mcp(_: argparse.Namespace) -> int:
+    # stdio transport: the protocol owns stdout, so nothing here may print to it.
+    from .mcp_server import run
+
+    run()
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -323,6 +332,9 @@ def main() -> int:
     i.add_argument("engine", choices=["trellis", "hunyuan"])
     i.add_argument("-y", "--yes", action="store_true")
     i.set_defaults(fn=cmd_install)
+
+    m = sub.add_parser("mcp", help="MCP server over stdio (needs `plumbus serve` running)")
+    m.set_defaults(fn=cmd_mcp)
 
     g = sub.add_parser("gen", help="generate one asset, no UI")
     g.add_argument("images", nargs="+")
