@@ -13,7 +13,7 @@ from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import backends, db, imagegen, worker
+from . import backends, db, gameready, imagegen, worker
 from .config import ROOT, settings
 
 WEB = ROOT / "web"
@@ -186,7 +186,14 @@ async def set_thumb(job_id: str, data_url: str = Form(...)) -> dict[str, Any]:
 
 
 @app.post("/api/jobs/{job_id}/export")
-async def export_job(job_id: str, name: str = Form(""), category: str = Form("models")) -> dict[str, Any]:
+async def export_job(
+    job_id: str,
+    name: str = Form(""),
+    category: str = Form("models"),
+    game_ready: bool = Form(True),
+    target_height: float | None = Form(None),
+    target_tris: int | None = Form(None),
+) -> dict[str, Any]:
     """Drop the asset into the parent 3d-assets repo in its house style."""
     job = db.get(job_id)
     if not job or job["status"] != "done" or not job.get("glb_path"):
@@ -199,33 +206,86 @@ async def export_job(job_id: str, name: str = Form(""), category: str = Form("mo
 
     src = Path(job["glb_path"])
     web = src.with_name(src.stem + ".web.glb")
-    shutil.copy2(src, dest_dir / f"{slug}.glb")
+    shutil.copy2(src, dest_dir / f"{slug}.source.glb")
     if web.exists():
         shutil.copy2(web, dest_dir / f"{slug}.web.glb")
     if job.get("thumb_path") and Path(job["thumb_path"]).exists():
         shutil.copy2(job["thumb_path"], dest_dir / "thumb.png")
 
     stats = job.get("stats") or {}
+    profile = (job["params"] or {}).get("_profile") or "object"
+
+    # The headline file is the one an engine can use: real-world scale, base at
+    # the origin, normals present, on a triangle budget. The raw generation is
+    # kept beside it as .source.glb because it is the better retopology input.
+    ready: dict[str, Any] = {}
+    if game_ready:
+        try:
+            ready = await gameready.prepare(
+                src, dest_dir / f"{slug}.glb",
+                profile=profile,
+                target_height=target_height,
+                target_tris=target_tris,
+            )
+        except Exception as exc:  # noqa: BLE001
+            shutil.copy2(src, dest_dir / f"{slug}.glb")
+            ready = {"notes": [f"game-ready pass failed ({exc.__class__.__name__}: {exc})"]}
+    else:
+        shutil.copy2(src, dest_dir / f"{slug}.glb")
+    after = ready.get("after") or {}
+    bbox = after.get("bbox") or stats.get("bbox") or []
+    height = f"{bbox[1]} m" if len(bbox) > 1 else "n/a"
+    topology = stats.get("topology") or {}
+    notes = "\n".join(f"- {n}" for n in ready.get("notes") or []) or "- exported as generated"
+
     (dest_dir / "README.md").write_text(
         f"""# {slug}
 
 Generated with [Plumbus](../../plumbus) using `{stats.get('engine', job['backend'])}`.
 
+`{slug}.glb` is the one to use. It is placed at real-world scale with its base on
+the origin, carries vertex normals, and is on a triangle budget with Draco and
+WebP compression. `{slug}.source.glb` is the raw generation, kept because it is
+the better input for retopology.
+
+## The asset
+
+| | |
+|---|---|
+| Height | {height} |
+| Origin | base at y=0, centred on x/z |
+| Triangles | {after.get('faces', stats.get('faces', 'n/a'))} |
+| Vertices | {after.get('vertices', stats.get('vertices', 'n/a'))} |
+| Attributes | `{after.get('attributes', 'n/a')}` |
+| Size | {round((after.get('bytes') or stats.get('bytes', 0)) / 1024)} KB |
+| PBR | {stats.get('pbr', 'n/a')} |
+
+## How it was made
+
 | | |
 |---|---|
 | Engine | `{stats.get('engine', job['backend'])}` |
-| Vertices | {stats.get('vertices', 'n/a')} |
-| Faces | {stats.get('faces', 'n/a')} |
-| PBR | {stats.get('pbr', 'n/a')} |
-| Size | {round(stats.get('bytes', 0) / 1024)} KB |
+| Profile | {profile} |
+| Quality | {(job['params'] or {}).get('_quality', 'n/a')} |
 | Generation time | {stats.get('seconds', 'n/a')}s |
 | Cost | ${job.get('cost_usd') or 0:.2f} |
+| Source image | `{Path(job['source_images'][0]).name if job['source_images'] else 'n/a'}` |
 
-Source image: `{Path(job['source_images'][0]).name if job['source_images'] else 'n/a'}`
+## What the finishing pass did
+
+{notes}
+
+## Known limits
+
+Raw generation left {topology.get('holes', 'n/a')} holes and
+{topology.get('boundary_edges', 'n/a')} boundary edges across
+{topology.get('bodies', 'n/a')} bodies. This is a static mesh with no skeleton,
+skin weights or blend shapes. For a deforming character it is a starting point
+for retopology, not a finished asset.
 """,
         encoding="utf-8",
     )
-    return {"exported": str(dest_dir.relative_to(repo))}
+    return {"exported": str(dest_dir.relative_to(repo)), "gameready": ready}
 
 
 # ------------------------------------------------------------------ reference images

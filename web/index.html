@@ -304,6 +304,38 @@
 
 </main>
 
+<div id="export-modal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-label="Export asset">
+    <h3>Export a game-ready asset</h3>
+    <p class="modal-lead" id="export-lead"></p>
+
+    <label class="row"><span class="lbl">Name</span>
+      <input type="text" id="export-name" autocomplete="off"
+             data-tip="Folder name under ../models/, and the filename stem."></label>
+
+    <label class="row check"
+           data-tip="Places the asset at real-world scale with its base on the origin, adds vertex normals, simplifies to the budget, and compresses. Off exports the raw generation.">
+      <input type="checkbox" id="export-ready" checked>
+      <span>Finish for a game engine <em>(scale, origin, normals, budget)</em></span>
+    </label>
+
+    <div class="modal-grid" id="export-tuning">
+      <label class="row"><span class="lbl">Height (m)</span>
+        <input type="number" id="export-height" step="0.01" min="0" placeholder="keep as generated"
+               data-tip="Real-world height. The mesh is scaled to this and its base dropped to y=0."></label>
+      <label class="row"><span class="lbl">Triangles</span>
+        <input type="number" id="export-tris" step="1000" min="500"
+               data-tip="Target triangle budget. A generated mesh often floors above this; the result says so honestly."></label>
+    </div>
+
+    <div class="modal-actions">
+      <button class="ghost" id="export-cancel">Cancel</button>
+      <button class="primary" id="export-go">Export</button>
+    </div>
+    <div class="modal-result" id="export-result" hidden></div>
+  </div>
+</div>
+
 <div id="tip" class="tip" hidden></div>
 <div id="toast" class="toast" hidden></div>
 

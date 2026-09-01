@@ -23,6 +23,7 @@ const state = {
   viewerSig: null,     // url signature of those images, so polling does not rebuild them
   drawing: false,      // a reference is being drawn; the viewer belongs to it
   match: new Map(),    // job id -> per-view reference match scores, computed on demand
+  imgShape: null,      // provider id + schema, so a poll cannot reset the form under you
   objectUrls: [],      // blob URLs held for the viewer, revoked on rebuild
 };
 
@@ -406,7 +407,16 @@ async function loadImagegen() {
     `<b>${prov.name}</b> · ${prov.blurb}` +
     (prov.available ? '' : `<div class="why">${prov.reason}</div>`);
 
-  renderParams($('#ref-params'), prov.params);
+  // This is on a 60s poll. Re-rendering the form would silently throw away the
+  // views and size the profile chose, so a draw started a minute later would
+  // quietly run at schema defaults. Only rebuild when the schema really changed.
+  const shape = JSON.stringify([prov.id, prov.params]);
+  if (shape !== state.imgShape) {
+    state.imgShape = shape;
+    renderParams($('#ref-params'), prov.params);
+    applyProfile();
+  }
+
   $('#btn-reference').disabled = !prov.available;
   $('#ref-subject').disabled = !prov.available;
   refreshPromptPeek();
@@ -1055,18 +1065,82 @@ $('#btn-cancel').addEventListener('click', async () => {
   } catch (err) { toast(err.message, true); }
 });
 
-$('#btn-export').addEventListener('click', async () => {
+/* ── export ────────────────────────────────────────────────────────────── */
+
+// Sensible finishing targets per profile. Mirrors gameready.PRESETS on the
+// server, which stays authoritative; these only prefill the form.
+const EXPORT_PRESETS = {
+  object:    { height: '',     tris: 20000 },
+  character: { height: '1.8',  tris: 60000 },
+  head:      { height: '0.24', tris: 30000 },
+};
+
+function openExport() {
   const job = state.jobs.find((j) => j.id === state.selected);
-  const suggested = job?.params?._name || state.selected;
-  const name = prompt('Export into ../<category>/<name>/ as:', suggested);
-  if (!name) return;
-  const fd = new FormData();
-  fd.append('name', name);
-  fd.append('category', 'models');
+  if (!job) return;
+  const profile = job.params?._profile || 'object';
+  const preset = EXPORT_PRESETS[profile] || EXPORT_PRESETS.object;
+
+  $('#export-name').value = job.params?._name || job.id;
+  $('#export-height').value = preset.height;
+  $('#export-tris').value = preset.tris;
+  $('#export-ready').checked = true;
+  $('#export-lead').textContent =
+    `${profile} asset, ${nf.format(job.stats?.faces || 0)} triangles as generated. ` +
+    'The raw mesh is kept alongside as .source.glb.';
+  $('#export-result').hidden = true;
+  $('#export-tuning').classList.remove('off');
+  $('#export-modal').hidden = false;
+  $('#export-name').focus();
+  $('#export-name').select();
+}
+
+function closeExport() { $('#export-modal').hidden = true; }
+
+$('#btn-export').addEventListener('click', openExport);
+$('#export-cancel').addEventListener('click', closeExport);
+$('#export-modal').addEventListener('click', (e) => { if (e.target.id === 'export-modal') closeExport(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#export-modal').hidden) closeExport();
+});
+$('#export-ready').addEventListener('change', (e) => {
+  $('#export-tuning').classList.toggle('off', !e.target.checked);
+});
+
+$('#export-go').addEventListener('click', async () => {
+  const name = $('#export-name').value.trim();
+  if (!name) { toast('Give the asset a name'); return; }
+
+  const btn = $('#export-go');
+  btn.disabled = true;
+  btn.textContent = 'Finishing…';
   try {
+    const fd = new FormData();
+    fd.append('name', name);
+    fd.append('category', 'models');
+    fd.append('game_ready', String($('#export-ready').checked));
+    const h = $('#export-height').value.trim();
+    const t = $('#export-tris').value.trim();
+    if (h) fd.append('target_height', h);
+    if (t) fd.append('target_tris', t);
+
     const r = await api(`/api/jobs/${state.selected}/export`, { method: 'POST', body: fd });
+    const g = r.gameready || {};
+    const a = g.after || {};
+    const box = $('#export-result');
+    box.hidden = false;
+    box.innerHTML = `
+      <b>${r.exported}/${name}.glb</b>
+      ${a.faces ? `<br>${nf.format(a.faces)} triangles · ${Math.round((a.bytes || 0) / 1024)}KB${
+        a.bbox ? ` · ${a.bbox[1]} units tall` : ''}` : ''}
+      ${(g.notes || []).length ? `<ul>${g.notes.map((n) => `<li>${n}</li>`).join('')}</ul>` : ''}`;
     toast(`Exported to ${r.exported}`);
-  } catch (err) { toast(err.message, true); }
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Export';
+  }
 });
 
 /* ── viewer tools ──────────────────────────────────────────────────────── */
