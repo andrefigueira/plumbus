@@ -61,14 +61,18 @@ def main() -> None:
 
     from mathutils import Vector
 
-    # blink: pull the brow band above each eye downward
-    add_key("blink_L", lambda c: c.x > 0.12 and c.y < -0.3 and 0.28 < c.z < 0.62,
-            lambda c: Vector((0, 0, -0.16)))
-    add_key("blink_R", lambda c: c.x < -0.12 and c.y < -0.3 and 0.28 < c.z < 0.62,
-            lambda c: Vector((0, 0, -0.16)))
-    # jaw: drop the chin region
+    # blink: the lid band is CENTRED ON THE EYES (z=0.25), not the brow.
+    # Authored above the eye line, a transferred blink furrows the target's
+    # brow while the eyes stay open, which is exactly what it did.
+    # Eyelid-sized, not sculptor-sized: a real lid travels about 1% of head
+    # height. Peak delta here is 0.033 on a 2-unit head, tightly banded.
+    add_key("blink_L", lambda c: 0.10 < c.x < 0.50 and c.y < -0.3 and 0.17 < c.z < 0.33,
+            lambda c: Vector((0, 0, -0.22 * max(0.0, 0.15 - abs(c.z - 0.25)))))
+    add_key("blink_R", lambda c: -0.50 < c.x < -0.10 and c.y < -0.3 and 0.17 < c.z < 0.33,
+            lambda c: Vector((0, 0, -0.22 * max(0.0, 0.15 - abs(c.z - 0.25)))))
+    # jaw: drop the chin region, gently
     add_key("jawOpen", lambda c: c.z < -0.45 and c.y < 0.1,
-            lambda c: Vector((0, -0.05, -0.22)))
+            lambda c: Vector((0, -0.02, -0.10)))
 
     for o in [head, *eyes]:
         o.select_set(True)

@@ -40,6 +40,11 @@ def args():
                     help="keep the template a hair outside the scan surface")
     ap.add_argument("--bake-size", type=int, default=2048,
                     help="albedo bake resolution; 0 skips the bake")
+    ap.add_argument("--mode", choices=["conform", "transfer"], default="conform",
+                    help="conform: the template becomes the asset (clean topology, "
+                         "games). transfer: the template's expression deltas are "
+                         "splatted onto the scan itself, which keeps every pixel "
+                         "and triangle of the generated head (hero fidelity, film).")
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     return ap.parse_args(argv)
 
@@ -145,6 +150,83 @@ def main() -> None:
         shift = sum((deltas[i] for i in near), Vector()) / len(near)
         eye.location += shift
         eye_moves[eye.name] = round(shift.length, 4)
+
+    if a.mode == "transfer":
+        # ── the scan keeps the looks, the template donates the movement.
+        # Every expression key's delta field is splatted from the wrapped
+        # template onto the scan's own vertices through a gaussian kernel over
+        # a KD-tree, so the 197k-triangle head that already looks like the
+        # reference gains blink_L / blink_R / jawOpen without losing a pixel.
+        from mathutils.kdtree import KDTree
+
+        expr_keys = [k for k in keys if k.name != "Basis"]
+        # world-space positions of template verts that any expression moves
+        idx_map = []
+        for i in range(n):
+            if any((k.data[i].co - keys[0].data[i].co).length > 1e-5 for k in expr_keys):
+                idx_map.append(i)
+        if not idx_map:
+            fail("template has no expression deltas to transfer")
+        head_mw = head.matrix_world
+        tree = KDTree(len(idx_map))
+        for j, i in enumerate(idx_map):
+            tree.insert(head_mw @ keys[0].data[i].co, j)
+        tree.balance()
+
+        span = (hi - lo).length or 1.0
+        # Tight kernel: expression detail is local. A wide radius drags the
+        # nose and forehead along with the lids, which reads as face collapse.
+        radius = span * 0.045
+        sigma2 = (radius * 0.55) ** 2
+
+        scan_me = scan.data
+        if not scan_me.shape_keys:
+            scan.shape_key_add(name="Basis", from_mix=False)
+        scan_mw = scan.matrix_world
+        scan_mw_inv = scan_mw.inverted()
+
+        made = {}
+        new_keys = {k.name: scan.shape_key_add(name=k.name, from_mix=False) for k in expr_keys}
+        vcount = len(scan_me.vertices)
+        touched = 0
+        for vi in range(vcount):
+            w_co = scan_mw @ scan_me.vertices[vi].co
+            hits = [(co, j, d) for co, j, d in tree.find_n(w_co, 6) if d < radius]
+            if not hits:
+                continue
+            touched += 1
+            weights = []
+            total = 0.0
+            for _, j, d in hits:
+                w = pow(2.718281828, -(d * d) / sigma2)
+                weights.append((idx_map[j], w))
+                total += w
+            for k in expr_keys:
+                delta = Vector()
+                for i, w in weights:
+                    delta += (head_mw @ k.data[i].co - head_mw @ keys[0].data[i].co) * w
+                delta /= total
+                nk = new_keys[k.name]
+                nk.data[vi].co = scan_me.vertices[vi].co + scan_mw_inv.to_3x3() @ delta
+        for name, nk in new_keys.items():
+            made[name] = True
+
+        # the scan IS the asset now; the template was only the donor
+        for o in list(template_objs):
+            bpy.data.objects.remove(o, do_unlink=True)
+        for o in bpy.data.objects:
+            o.select_set(o is scan)
+        bpy.ops.export_scene.gltf(filepath=a.out, export_format="GLB",
+                                  use_selection=True, export_morph=True,
+                                  export_yup=True, export_apply=False)
+        print("PLUMBUS_RESULT: " + json.dumps({
+            "ok": True,
+            "mode": "transfer",
+            "scan_vertices": vcount,
+            "vertices_given_motion": touched,
+            "shape_keys": ["Basis", *made.keys()],
+        }))
+        return
 
     # ── carry the face across: bake the scan's albedo onto the template's UVs.
     # Selected-to-active diffuse bake, colour pass only, so no lighting is
