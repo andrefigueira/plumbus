@@ -13,6 +13,8 @@ dependencies = [
     "pillow>=10.4",
     "trimesh>=4.5",
     "numpy>=1.26",
+    "networkx>=3.0",
+    "scipy>=1.11",
 ]
 
 [project.optional-dependencies]

@@ -28,7 +28,7 @@ from .base import (
     ImageRequest,
     ImageResult,
 )
-from .prompts import MULTIVIEW_ORDER, VIEW_LABELS, build, build_view_edit
+from .prompts import SELECTABLE_VIEWS, VIEW_LABELS, build, build_view_edit
 
 API = "https://api.openai.com/v1"
 
@@ -54,7 +54,7 @@ class GPTImage2Provider(ImageProvider):
                 "type": "views",
                 "default": ["three_quarter"],
                 "options": [
-                    {"value": v, "label": VIEW_LABELS[v]} for v in MULTIVIEW_ORDER
+                    {"value": v, "label": VIEW_LABELS[v]} for v in SELECTABLE_VIEWS
                 ],
                 "help": "Extra views are drawn from the first one, so identity holds. "
                         "Two to four views make the back of the mesh real instead of guessed.",

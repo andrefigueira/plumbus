@@ -30,6 +30,15 @@ VIEW_LABELS: dict[str, str] = {
 # Ordered so the first N of a multi-view set are the most informative.
 MULTIVIEW_ORDER = ["three_quarter", "front", "left", "back"]
 
+# A head has no use for a rear view: Mesh to MetaHuman explicitly tolerates a
+# rough skull but wants forehead-to-chin and both ears observed properly.
+HEAD_MULTIVIEW_ORDER = ["front", "left", "right", "three_quarter"]
+
+# Everything a profile might want to switch on. The schema offers all of these
+# and each profile picks its own defaults, so a head can ask for both profiles
+# without the object flow having to care.
+SELECTABLE_VIEWS = ["three_quarter", "front", "left", "right", "back"]
+
 _GEOMETRY_RULES = (
     "The entire subject is visible with clear margin on all sides, nothing cropped "
     "or cut off at any edge. One single object only, centred in frame. "
@@ -63,8 +72,32 @@ _CHARACTER_RULES = (
 )
 
 
+_HEAD_RULES = (
+    "Framing: head and shoulders only, filling the frame from the top of the head to the "
+    "collarbone. Nothing below the shoulders. "
+    "The head is upright and the neck straight, facing the camera squarely for the front view. "
+    "Completely neutral, relaxed expression, no smile, mouth closed with the lips lightly "
+    "together and the jaw unclenched. Both eyes open, wide and unsquinting, looking straight "
+    "ahead, with the upper eyelid clear of the iris. "
+    "Both ears fully visible and unobstructed, hair tucked behind them or pulled back off the "
+    "face. No hair across the forehead, eyes, cheeks or jawline. "
+    "No glasses, no headwear, no hood, no mask, no jewellery, no piercings, nothing covering "
+    "any part of the face. No makeup and no face paint. "
+    "Critically, the face carries no shadow of any kind: no shadow in the eye sockets, none "
+    "under the brow, none under the nose, none under the lower lip, none under the chin or "
+    "jaw, and none cast by the hair. Light the face flatly and evenly from directly in front. "
+    "No specular highlight or catchlight in the eyes, on the nose, forehead or cheekbones. "
+    "Skin reads as skin: pores, fine lines, stubble and natural colour variation are visible, "
+    "but flat and unshaded, never glossy, wet or waxy."
+)
+
+
 def _profile_rules(profile: str) -> str:
-    return _CHARACTER_RULES if profile == "character" else _OBJECT_DETAIL_RULES
+    if profile == "head":
+        return _HEAD_RULES
+    if profile == "character":
+        return _CHARACTER_RULES
+    return _OBJECT_DETAIL_RULES
 
 
 def build(
@@ -77,8 +110,13 @@ def build(
     subject = subject.strip().rstrip(".")
     camera = VIEWS.get(view, VIEWS["three_quarter"])
     background = _BG_TRANSPARENT if transparent else _BG_FLAT
+    lead = (
+        f"The head of {subject}, photographed as a clean 3D head-scan reference. "
+        if profile == "head"
+        else f"A single {subject}, photographed as a clean 3D modelling reference. "
+    )
     return (
-        f"A single {subject}, photographed as a clean 3D modelling reference. "
+        f"{lead}"
         f"Camera: {camera}. "
         f"{background} "
         f"{_GEOMETRY_RULES} {_profile_rules(profile)}"
@@ -99,8 +137,9 @@ def build_view_edit(
     subject = subject.strip().rstrip(".")
     camera = VIEWS.get(view, VIEWS["front"])
     background = _BG_TRANSPARENT if transparent else _BG_FLAT
+    what = f"head of {subject}" if profile == "head" else subject
     return (
-        f"Redraw the exact same {subject} from the attached reference image, "
+        f"Redraw the exact same {what} from the attached reference image, "
         f"unchanged in shape, proportion, colour, material and every detail. "
         f"Only the camera angle changes. Camera: {camera}. "
         f"{background} {_GEOMETRY_RULES} {_profile_rules(profile)}"

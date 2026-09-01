@@ -77,14 +77,24 @@ async def _run_one(job: dict) -> None:
             else:
                 await on_event("repairing", 0.93, None)
                 try:
-                    r = repair_mesh(result.glb_path)
+                    r = repair_mesh(
+                        result.glb_path,
+                        min_body_frac=float(params.get("drop_fragments_below") or 0.0),
+                    )
                     b, a = r["before"], r["after"]
                     db.append_log(
                         job_id,
                         f"[repair] holes {b['holes']} -> {a['holes']}, "
                         f"boundary edges {b['boundary_edges']} -> {a['boundary_edges']}, "
-                        f"+{r['faces_added']} faces",
+                        f"bodies {b['bodies']} -> {a['bodies']}, "
+                        f"+{r['faces_added']} faces, -{r['faces_dropped']} stray",
                     )
+                    if r["skipped_large_openings"]:
+                        db.append_log(
+                            job_id,
+                            f"[repair] left {r['skipped_large_openings']} large opening(s) alone; "
+                            f"at that size they are meant to be open",
+                        )
                 except Exception as exc:  # noqa: BLE001
                     # A repair failure must never cost you the mesh you just waited for.
                     db.append_log(job_id, f"[repair] skipped ({exc.__class__.__name__}: {exc})")

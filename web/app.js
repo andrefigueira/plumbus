@@ -69,7 +69,7 @@ function saveSetup() {
 function loadSetup() {
   try {
     const saved = JSON.parse(localStorage.getItem('plumbus-setup') || '{}');
-    if (['object', 'character'].includes(saved.profile)) state.profile = saved.profile;
+    if (PROFILES[saved.profile]) state.profile = saved.profile;
     if (QUALITY[saved.quality]) state.quality = saved.quality;
     if (STEPS.includes(saved.step)) state.step = saved.step;
     if (saved.subject) $('#ref-subject').value = saved.subject;
@@ -287,34 +287,58 @@ function applyQualityPreset() {
   syncGenerate();
 }
 
+const PROFILES = {
+  object: {
+    // Static props want a watertight shell, so fill and tidy freely.
+    preserveDeformation: false, repairHoles: true, dropFragments: 0.002,
+    views: ['three_quarter'], base: 'three_quarter', size: '1024x1024',
+    placeholder: 'Cast iron fire hydrant, chipped red paint, hexagonal bolts',
+    hint: 'Use a clean three-quarter view, one subject, plain background and even light. Fine detail must be visible in the source to survive into geometry.',
+  },
+  character: {
+    // Anything headed for retopology keeps its edge flow, so no filling.
+    preserveDeformation: true, repairHoles: false, dropFragments: 0,
+    views: ['front', 'left', 'back', 'three_quarter'], base: 'front', size: '1024x1024',
+    placeholder: 'Full-body realistic character, age, facial identity, clothing and materials',
+    hint: 'Use a full-body neutral A-pose with visible hands and feet. Front, profile and back views give the best foundation for retopology and rigging.',
+  },
+  head: {
+    // Mesh to MetaHuman wants one clean continuous surface, not edge flow, so
+    // this is the opposite of Character on purpose.
+    preserveDeformation: false, repairHoles: true, dropFragments: 0.002,
+    views: ['front', 'left', 'right', 'three_quarter'], base: 'front', size: '2048x2048',
+    placeholder: 'Weathered samurai in his forties, scar across the left cheek',
+    hint: 'Head and shoulders only. Cropping to the head is the whole point: a full-body reference leaves about 100px of face, this leaves about 900px, and the texture is spent on one head instead of a whole body.',
+  },
+};
+
 function applyProfile() {
+  const spec = PROFILES[state.profile] || PROFILES.object;
   $$('#profile-switch button').forEach((b) => {
     const on = b.dataset.profile === state.profile;
     b.classList.toggle('on', on);
     b.setAttribute('aria-pressed', String(on));
   });
-  const character = state.profile === 'character';
-  $('#preserve-deformation').checked = character;
-  $('#repair-holes').checked = !character;
-  $('#ref-subject').placeholder = character
-    ? 'Full-body realistic character, age, facial identity, clothing and materials'
-    : 'Cast iron fire hydrant, chipped red paint, hexagonal bolts';
-  $('#source-hint').textContent = character
-    ? 'Use a full-body neutral A-pose with visible hands and feet. Front, profile and back views give the best foundation for retopology and rigging.'
-    : 'Use a clean three-quarter view, one subject, plain background and even light. Fine detail must be visible in the source to survive into geometry.';
 
-  if (character && state.quality === 'preview') state.quality = 'detailed';
+  $('#preserve-deformation').checked = spec.preserveDeformation;
+  $('#repair-holes').checked = spec.repairHoles;
+  $('#ref-subject').placeholder = spec.placeholder;
+  $('#source-hint').textContent = spec.hint;
+
+  const sizeEl = $('#ref-params [data-key="size"]');
+  if (sizeEl && [...sizeEl.options].some((o) => o.value === spec.size)) sizeEl.value = spec.size;
+
+  if (state.profile !== 'object' && state.quality === 'preview') state.quality = 'detailed';
   const chips = [...$('#ref-params').querySelectorAll('[data-views] .chip')];
   if (chips.length) {
-    const preferred = new Set(character ? ['front', 'left', 'back', 'three_quarter'] : ['three_quarter']);
+    const preferred = new Set(spec.views);
     chips.forEach((c) => {
       const on = preferred.has(c.dataset.value);
       c.classList.toggle('on', on);
       c.setAttribute('aria-pressed', String(on));
       c.classList.remove('base');
     });
-    const baseValue = character ? 'front' : 'three_quarter';
-    chips.find((c) => c.dataset.value === baseValue)?.classList.add('base');
+    chips.find((c) => c.dataset.value === spec.base)?.classList.add('base');
   }
   applyQualityPreset();
   refreshPromptPeek();
@@ -363,6 +387,7 @@ function collectParams(wrap = $('#params'), { extras = true } = {}) {
     out.preserve_deformation = $('#preserve-deformation').checked;
     out._profile = state.profile;
     out._quality = state.quality;
+    out.drop_fragments_below = (PROFILES[state.profile] || PROFILES.object).dropFragments;
   }
   return out;
 }
@@ -704,7 +729,7 @@ function syncGenerate() {
   const b = state.backend;
   const ready = !!b && (staged() > 0 || b.accepts_text);
   $('#btn-generate').disabled = !ready;
-  const profile = state.profile === 'character' ? 'character' : 'object';
+  const profile = state.profile;
   $('#generate-label').textContent = `${QUALITY[state.quality].label} ${profile}`;
   $('#generate-meta').textContent = !b
     ? 'Choose an engine'
@@ -730,7 +755,7 @@ function renderRunSummary() {
   if (!dl) return;
   const b = state.backend;
   const rows = [
-    ['Profile', state.profile === 'character' ? 'Character' : 'Object'],
+    ['Profile', { object: 'Object', character: 'Character', head: 'Head' }[state.profile] || 'Object'],
     ['Quality', QUALITY[state.quality].label],
     ['Engine', b ? `${b.name} (${b.kind})` : 'none usable'],
     ['References', staged() ? `${staged()} image${staged() === 1 ? '' : 's'}` : b?.accepts_text ? 'text only' : 'none'],
