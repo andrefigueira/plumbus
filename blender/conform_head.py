@@ -38,6 +38,8 @@ def args():
     ap.add_argument("--out", required=True)
     ap.add_argument("--wrap-offset", type=float, default=0.002,
                     help="keep the template a hair outside the scan surface")
+    ap.add_argument("--bake-size", type=int, default=2048,
+                    help="albedo bake resolution; 0 skips the bake")
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     return ap.parse_args(argv)
 
@@ -100,6 +102,9 @@ def main() -> None:
     scan.location += (t_lo + t_hi) / 2 - (s_lo + s_hi) / 2
     bpy.context.view_layer.update()
 
+    hi = t_hi
+    lo = t_lo
+
     # ── remember where the head's vertices start, in world space
     depsgraph = bpy.context.evaluated_depsgraph_get()
     basis_world = [head.matrix_world @ v.co for v in head.data.vertices]
@@ -141,6 +146,53 @@ def main() -> None:
         eye.location += shift
         eye_moves[eye.name] = round(shift.length, 4)
 
+    # ── carry the face across: bake the scan's albedo onto the template's UVs.
+    # Selected-to-active diffuse bake, colour pass only, so no lighting is
+    # cooked in. The template sits a hair off the scan surface, so rays get a
+    # cage extrusion and a generous max distance to land in both directions.
+    baked = False
+    bake_error = None
+    if a.bake_size:
+        try:
+            scene = bpy.context.scene
+            scene.render.engine = "CYCLES"
+            scene.cycles.device = "CPU"
+            scene.cycles.samples = 4
+
+            img = bpy.data.images.new("HeadAlbedo", a.bake_size, a.bake_size, alpha=False)
+            mat = bpy.data.materials.new("HeadBaked")
+            mat.use_nodes = True
+            nt = mat.node_tree
+            tex = nt.nodes.new("ShaderNodeTexImage")
+            tex.image = img
+            head.data.materials.clear()
+            head.data.materials.append(mat)
+            nt.nodes.active = tex
+            tex.select = True
+
+            for o in bpy.data.objects:
+                o.select_set(False)
+            scan.select_set(True)
+            head.select_set(True)
+            bpy.context.view_layer.objects.active = head
+
+            span = (hi - lo).length if (hi - lo).length > 0 else 1.0
+            bpy.ops.object.bake(
+                type="DIFFUSE", pass_filter={"COLOR"},
+                use_selected_to_active=True,
+                cage_extrusion=span * 0.03,
+                max_ray_distance=span * 0.3,
+                margin=8,
+            )
+            bsdf = next(n for n in nt.nodes if n.type == "BSDF_PRINCIPLED")
+            nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+            bsdf.inputs["Roughness"].default_value = 0.62
+            img.pack()
+            baked = True
+        except Exception as exc:  # noqa: BLE001
+            # A failed bake must never cost the conform; ship white over nothing.
+            bake_error = f"{exc.__class__.__name__}: {exc}"
+
     # ── the mould has done its job
     bpy.data.objects.remove(scan, do_unlink=True)
 
@@ -157,6 +209,8 @@ def main() -> None:
         "mean_wrap_delta": round(mean_delta, 4),
         "shape_keys": [k.name for k in keys if k.name],
         "eyes": eye_moves,
+        "baked": baked,
+        "bake_error": bake_error,
     }))
 
 
